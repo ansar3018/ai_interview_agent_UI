@@ -20,7 +20,7 @@ import {
 } from "lucide-react"
 import Link from "next/link"
 import { useParams } from "next/navigation"
-import { apiClient } from "@/lib/api"
+import { GazingSummary } from "@/components/facial-gazing/gazing-summary"
 
 interface DetailedReport {
   interview_id: string
@@ -52,6 +52,14 @@ interface DetailedReport {
   summary: string
   strengths: string[]
   areas_for_improvement: string[]
+  gazingAnalysis: {
+    averageAttentionScore: number
+    totalEyeContactTime: number
+    totalLookingAwayTime: number
+    averageBlinkRate: number
+    engagementLevel: "Low" | "Medium" | "High"
+    recommendations: string[]
+  }
 }
 
 export default function ReportDetailPage() {
@@ -66,7 +74,7 @@ export default function ReportDetailPage() {
 
   const fetchReport = async () => {
     try {
-      const response = await apiClient.getInterviewReport(params.id)
+      const response = await fetch(`/api/v1/reports/${params.id}`)
 
       if (response.ok) {
         const data = await response.json()
@@ -133,6 +141,18 @@ export default function ReportDetailPage() {
             "Would benefit from discussing team collaboration more",
             "Could elaborate on leadership experience",
           ],
+          gazingAnalysis: {
+            averageAttentionScore: 78,
+            totalEyeContactTime: 180,
+            totalLookingAwayTime: 45,
+            averageBlinkRate: 16,
+            engagementLevel: "Medium" as const,
+            recommendations: [
+              "Maintain more consistent eye contact with the camera",
+              "Try to reduce looking away during responses",
+              "Consider adjusting camera position for better eye level alignment",
+            ],
+          },
         })
       }
     } catch (error) {
@@ -335,6 +355,9 @@ export default function ReportDetailPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Facial Gazing Analysis */}
+      <GazingSummary data={report.gazingAnalysis} />
 
       {/* Strengths and Areas for Improvement */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

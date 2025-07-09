@@ -6,8 +6,22 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Progress } from "@/components/ui/progress"
-import { Video, VideoOff, Mic, MicOff, Play, Square, Volume2, VolumeX, Clock, User, MessageSquare } from "lucide-react"
+import {
+  Video,
+  VideoOff,
+  Mic,
+  MicOff,
+  Play,
+  Square,
+  Volume2,
+  VolumeX,
+  Clock,
+  User,
+  MessageSquare,
+  Eye,
+} from "lucide-react"
 import { useParams, useRouter } from "next/navigation"
+import { FaceTracker } from "@/components/facial-gazing/face-tracker"
 
 interface InterviewSession {
   id: string
@@ -35,56 +49,42 @@ export default function ConductInterviewPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
   const [autoAdvanceEnabled, setAutoAdvanceEnabled] = useState(true)
-  const [responseCaptured, setResponseCaptured] = useState(false)
-  const latestTranscript = useRef("")
+  const [speechRecognitionSupported, setSpeechRecognitionSupported] = useState(false)
+  const [interviewStarted, setInterviewStarted] = useState(false)
+  const [showTextInput, setShowTextInput] = useState(false)
+  const [textInput, setTextInput] = useState("")
+
+  const [gazingMetrics, setGazingMetrics] = useState<any>(null)
+  const [gazingEnabled, setGazingEnabled] = useState(true)
+  const [trackingOn, setTrackingOn] = useState(true)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const mediaStreamRef = useRef<MediaStream | null>(null)
   const speechSynthesisRef = useRef<SpeechSynthesisUtterance | null>(null)
   const speechRecognitionRef = useRef<any>(null)
+  const currentTranscript = useRef("")
+  const silenceTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
   useEffect(() => {
     initializeInterview()
     setupMediaDevices()
-    setupSpeechRecognition()
+    checkSpeechRecognitionSupport()
 
     return () => {
       cleanup()
     }
   }, [])
 
-  useEffect(() => {
-    if (isListening && currentResponse.trim() && autoAdvanceEnabled) {
-      // Clear existing timer
-      // Set new timer for 3 seconds of silence
-      const timer = setTimeout(() => {
-        if (currentResponse.trim()) {
-          stopListening()
-          // Auto advance after 2 more seconds
-          setTimeout(() => {
-            nextQuestion()
-          }, 2000)
-        }
-      }, 3000)
-
-      return () => {
-        clearTimeout(timer)
-      }
-    }
-  }, [currentResponse, isListening, autoAdvanceEnabled])
-
   const initializeInterview = async () => {
     try {
-      // Start the interview
+      // Mock API call - replace with actual API
       // const response = await fetch(`/api/v1/interviews/${params.id}/start`, {
       //   method: "POST",
       // })
-
       // if (!response.ok) {
       //   throw new Error("Failed to start interview")
       // }
 
-      // Initialize session with mock data (replace with actual API data)
       setSession({
         id: params.id as string,
         candidate_id: "candidate-123",
@@ -124,69 +124,146 @@ export default function ConductInterviewPage() {
       }
     } catch (error) {
       console.error("Failed to access media devices:", error)
-      setError("Failed to access camera/microphone")
+      setError("Failed to access camera/microphone. Please allow permissions and refresh the page.")
     }
   }
 
-  const setupSpeechRecognition = () => {
-    if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
-      setError('Speech recognition not supported in this browser')
-      return
+  const checkSpeechRecognitionSupport = () => {
+    const isSupported = "webkitSpeechRecognition" in window || "SpeechRecognition" in window
+    setSpeechRecognitionSupported(isSupported)
+
+    if (!isSupported) {
+      setError("Speech recognition is not supported in this browser. Please use Chrome, Edge, or Safari.")
     }
+  }
+
+  const createSpeechRecognition = () => {
+    if (!speechRecognitionSupported) {
+      setError("Speech recognition is not supported in this browser")
+      return null
+    }
+
     const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition
-    speechRecognitionRef.current = new SpeechRecognition()
-    speechRecognitionRef.current.continuous = false
-    speechRecognitionRef.current.interimResults = true
-    speechRecognitionRef.current.lang = 'en-US'
-    speechRecognitionRef.current.maxAlternatives = 1
+    const recognition = new SpeechRecognition()
 
-    speechRecognitionRef.current.onstart = () => {
-      setIsListening(true)
-      setResponseCaptured(false)
-      latestTranscript.current = ""
-      setCurrentResponse("")
-      setError("")
+    recognition.continuous = true
+    recognition.interimResults = true
+    recognition.lang = "en-US"
+    recognition.maxAlternatives = 1
+
+    recognition.onstart = () => {
       console.log("Speech recognition started")
+      setIsListening(true)
+      setError("")
+      currentTranscript.current = ""
+
+      // Set a longer timeout to prevent premature "no-speech" errors
+      setTimeout(() => {
+        if (isListening && !currentTranscript.current.trim()) {
+          console.log("No speech detected after 10 seconds, but continuing to listen...")
+        }
+      }, 10000)
     }
 
-    speechRecognitionRef.current.onresult = (event: any) => {
-      let transcript = ""
+    recognition.onresult = (event: any) => {
+      let finalTranscript = ""
+      let interimTranscript = ""
+
       for (let i = event.resultIndex; i < event.results.length; i++) {
-        transcript += event.results[i][0].transcript
+        const transcript = event.results[i][0].transcript
+        if (event.results[i].isFinal) {
+          finalTranscript += transcript
+        } else {
+          interimTranscript += transcript
+        }
       }
-      latestTranscript.current += transcript
-      setCurrentResponse(latestTranscript.current.trim())
-      console.log("Interim/Final transcript:", transcript)
+
+      if (finalTranscript) {
+        currentTranscript.current += " " + finalTranscript
+        setCurrentResponse(currentTranscript.current.trim())
+
+        // Reset silence timer when we get speech
+        if (silenceTimeoutRef.current) {
+          clearTimeout(silenceTimeoutRef.current)
+        }
+
+        // Set new silence timer if auto-advance is enabled
+        if (autoAdvanceEnabled) {
+          silenceTimeoutRef.current = setTimeout(() => {
+            stopListening()
+            setTimeout(() => {
+              if (currentTranscript.current.trim()) {
+                nextQuestion(currentTranscript.current.trim())
+              }
+            }, 1000)
+          }, 4000) // Increased to 4 seconds
+        }
+      }
+
+      // Show interim results
+      if (interimTranscript && !finalTranscript) {
+        const tempTranscript = currentTranscript.current + " " + interimTranscript
+        setCurrentResponse(tempTranscript.trim())
+      }
     }
 
-    speechRecognitionRef.current.onend = () => {
+    recognition.onend = () => {
+      console.log("Speech recognition ended")
       setIsListening(false)
-      setResponseCaptured(true)
-      setCurrentResponse(latestTranscript.current.trim())
-      console.log("Speech recognition ended. Final transcript:", latestTranscript.current.trim())
-      if (autoAdvanceEnabled && latestTranscript.current.trim()) {
-        nextQuestion(latestTranscript.current.trim())
+
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current)
+      }
+
+      // If we have some transcript, don't show error
+      if (currentTranscript.current.trim()) {
+        console.log("Recognition ended with transcript:", currentTranscript.current)
       }
     }
 
-    speechRecognitionRef.current.onerror = (event: any) => {
-      console.error("Speech recognition error event:", event)
-      if (event.error === "not-allowed" || event.error === "denied") {
-        setError("Microphone permission denied. Please allow access and try again.")
-      } else if (event.error === "audio-capture") {
-        setError("No microphone found or it is in use by another application.")
-      } else if (event.error === "no-speech") {
-        setError("No speech detected. Please try speaking again.")
-      } else {
-        setError("Speech recognition error: " + event.error)
-      }
+    recognition.onerror = (event: any) => {
+      console.error("Speech recognition error:", event.error)
       setIsListening(false)
+
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current)
+      }
+
+      switch (event.error) {
+        case "not-allowed":
+        case "denied":
+          setError("Microphone permission denied. Please allow microphone access and try again.")
+          break
+        case "audio-capture":
+          setError("No microphone found. Please check your microphone and try again.")
+          break
+        case "no-speech":
+          // Don't show error immediately, give user a chance to try again
+          if (currentTranscript.current.trim()) {
+            console.log("No-speech error but we have transcript, ignoring")
+            return
+          }
+          setError("No speech detected. Please check your microphone and try speaking again.")
+          break
+        case "network":
+          setError("Network error. Please check your internet connection.")
+          break
+        case "aborted":
+          // User manually stopped, don't show error
+          console.log("Speech recognition was stopped by user")
+          break
+        default:
+          setError(`Speech recognition error: ${event.error}. Please try again.`)
+      }
     }
+
+    return recognition
   }
 
   const speakQuestion = (question: string) => {
     if ("speechSynthesis" in window) {
       setIsSpeaking(true)
+      setError("")
 
       const utterance = new SpeechSynthesisUtterance(question)
       utterance.rate = 0.9
@@ -195,30 +272,61 @@ export default function ConductInterviewPage() {
 
       utterance.onend = () => {
         setIsSpeaking(false)
-        startListening()
+        console.log("TTS finished speaking")
+      }
+
+      utterance.onerror = () => {
+        setIsSpeaking(false)
+        setError("Failed to speak question. Please try again.")
       }
 
       speechSynthesisRef.current = utterance
       speechSynthesis.speak(utterance)
+    } else {
+      setError("Text-to-speech is not supported in this browser")
     }
   }
 
   const startListening = () => {
-    if (!speechRecognitionRef.current) {
-      setError("Speech recognition is not initialized or not supported.")
+    if (!speechRecognitionSupported) {
+      setError("Speech recognition is not supported in this browser")
       return
     }
-    if (!isListening) {
-      setError("")
-      setResponseCaptured(false)
-      latestTranscript.current = ""
-      setCurrentResponse("")
-      try {
-        speechRecognitionRef.current.start()
-      } catch (error) {
-        setError("Failed to start speech recognition. Please try again.")
-        setIsListening(false)
+
+    if (isListening) {
+      console.log("Already listening")
+      return
+    }
+
+    // Check microphone permission first
+    if (!mediaStreamRef.current) {
+      setError("Please allow microphone access first")
+      return
+    }
+
+    setError("")
+    setCurrentResponse("")
+    currentTranscript.current = ""
+
+    try {
+      const recognition = createSpeechRecognition()
+      if (recognition) {
+        speechRecognitionRef.current = recognition
+
+        // Add a small delay to ensure microphone is ready
+        setTimeout(() => {
+          try {
+            recognition.start()
+          } catch (startError) {
+            console.error("Failed to start recognition:", startError)
+            setError("Failed to start speech recognition. Please try again.")
+            setIsListening(false)
+          }
+        }, 100)
       }
+    } catch (error) {
+      console.error("Failed to create speech recognition:", error)
+      setError("Failed to initialize speech recognition. Please try again.")
     }
   }
 
@@ -226,17 +334,34 @@ export default function ConductInterviewPage() {
     if (speechRecognitionRef.current && isListening) {
       try {
         speechRecognitionRef.current.stop()
-        setIsListening(false)
+        speechRecognitionRef.current = null
       } catch (error) {
-        setError("Failed to stop speech recognition.")
+        console.error("Failed to stop speech recognition:", error)
       }
+    }
+
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current)
+      silenceTimeoutRef.current = null
+    }
+
+    setIsListening(false)
+  }
+
+  const startInterview = () => {
+    setInterviewStarted(true)
+    if (session) {
+      speakQuestion(session.questions[0])
     }
   }
 
-  const nextQuestion = (responseOverride?: string) => {
+  const nextQuestion = (transcript: string) => {
     if (!session) return
-    const responseToSave = responseOverride !== undefined ? responseOverride : currentResponse
-    const updatedResponses = [...session.responses, responseToSave]
+
+    stopListening()
+
+    const updatedResponses = [...session.responses, transcript]
+
     if (session.currentQuestion < session.totalQuestions - 1) {
       const updatedSession = {
         ...session,
@@ -245,8 +370,8 @@ export default function ConductInterviewPage() {
       }
       setSession(updatedSession)
       setCurrentResponse("")
-      setResponseCaptured(false)
-      latestTranscript.current = ""
+      currentTranscript.current = ""
+
       setTimeout(() => {
         speakQuestion(updatedSession.questions[updatedSession.currentQuestion])
       }, 1000)
@@ -257,9 +382,9 @@ export default function ConductInterviewPage() {
 
   const endInterview = async (finalResponses: string[]) => {
     try {
-      await fetch(`/api/v1/interviews/${params.id}/end`, {
-        method: "POST",
-      })
+      // await fetch(`/api/v1/interviews/${params.id}/end`, {
+      //   method: "POST",
+      // })
 
       cleanup()
       router.push(`/reports/${params.id}`)
@@ -279,6 +404,11 @@ export default function ConductInterviewPage() {
 
     if (speechRecognitionRef.current) {
       speechRecognitionRef.current.stop()
+      speechRecognitionRef.current = null
+    }
+
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current)
     }
   }
 
@@ -302,15 +432,6 @@ export default function ConductInterviewPage() {
     }
   }
 
-  const restartListening = () => {
-    if (speechRecognitionRef.current) {
-      stopListening()
-      setTimeout(() => {
-        startListening()
-      }, 500)
-    }
-  }
-
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -319,11 +440,11 @@ export default function ConductInterviewPage() {
     )
   }
 
-  if (error || !session) {
+  if (!session) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <Alert variant="destructive" className="max-w-md">
-          <AlertDescription>{error || "Failed to load interview"}</AlertDescription>
+          <AlertDescription>Failed to load interview session</AlertDescription>
         </Alert>
       </div>
     )
@@ -332,6 +453,13 @@ export default function ConductInterviewPage() {
   return (
     <div className="min-h-screen bg-gray-50 p-4">
       <div className="max-w-6xl mx-auto">
+        {/* Error Display */}
+        {error && (
+          <Alert variant="destructive" className="mb-6">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+
         {/* Header */}
         <div className="mb-6">
           <div className="flex items-center justify-between mb-4">
@@ -368,6 +496,11 @@ export default function ConductInterviewPage() {
                 <div className="relative bg-black rounded-lg overflow-hidden aspect-video">
                   <video ref={videoRef} autoPlay muted className="w-full h-full object-cover" />
 
+                  {/* Add this after the video element and before the controls */}
+                  {gazingEnabled && (
+                    <FaceTracker videoRef={videoRef} isActive={interviewStarted} onMetricsUpdate={setGazingMetrics} />
+                  )}
+
                   {!isVideoEnabled && (
                     <div className="absolute inset-0 bg-gray-800 flex items-center justify-center">
                       <VideoOff className="h-12 w-12 text-gray-400" />
@@ -391,116 +524,257 @@ export default function ConductInterviewPage() {
 
           {/* Interview Control */}
           <div className="space-y-6">
+            {/* Start Interview */}
+            {!interviewStarted && (
+              <Card className="border-green-200 bg-green-50">
+                <CardHeader>
+                  <CardTitle className="text-green-800">Ready to Start?</CardTitle>
+                  <CardDescription>Click the button below to begin your interview</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <Button onClick={startInterview} className="w-full bg-green-600 hover:bg-green-700">
+                    Start Interview
+                  </Button>
+                </CardContent>
+              </Card>
+            )}
+
             {/* Current Question */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <MessageSquare className="h-5 w-5" />
-                  Current Question
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-4">
-                  <p className="text-lg font-medium">{session.questions[session.currentQuestion]}</p>
+            {interviewStarted && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <MessageSquare className="h-5 w-5" />
+                    Current Question
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-4">
+                    <p className="text-lg font-medium">{session.questions[session.currentQuestion]}</p>
 
-                  <div className="flex items-center gap-2">
-                    <Button
-                      size="sm"
-                      onClick={() => speakQuestion(session.questions[session.currentQuestion])}
-                      disabled={isSpeaking}
-                      variant="outline"
-                    >
-                      {isSpeaking ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
-                      {isSpeaking ? "Speaking..." : "Repeat Question"}
-                    </Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Response Capture */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center justify-between">
-                  Response
-                  {isListening && (
-                    <Badge variant="secondary" className="animate-pulse">
-                      <Mic className="h-3 w-3 mr-1" />
-                      Listening...
-                    </Badge>
-                  )}
-                </CardTitle>
-                <CardDescription>
-                  {isListening
-                    ? "Speak clearly into your microphone..."
-                    : responseCaptured && currentResponse.trim()
-                    ? "Response captured."
-                    : "Click start to begin recording your response"}
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-4">
-                  <div className="min-h-24 p-3 bg-gray-50 rounded-lg border">
-                    {currentResponse ? (
-                      <p className="text-sm text-gray-800">{currentResponse}</p>
-                    ) : (
-                      <p className="text-sm text-gray-500 italic">
-                        {isListening ? "Listening... speak now" : "Response will appear here..."}
-                      </p>
-                    )}
-                  </div>
-                  <div className="flex gap-2">
-                    {!isListening && !responseCaptured ? (
-                      <Button size="sm" onClick={startListening} className="flex items-center gap-1">
-                        <Play className="h-3 w-3" />
-                        Start Recording
-                      </Button>
-                    ) : isListening ? (
+                    <div className="flex items-center gap-2">
                       <Button
                         size="sm"
-                        onClick={stopListening}
-                        variant="destructive"
-                        className="flex items-center gap-1"
+                        onClick={() => speakQuestion(session.questions[session.currentQuestion])}
+                        disabled={isSpeaking}
+                        variant="outline"
                       >
-                        <Square className="h-3 w-3" />
-                        Stop Recording
+                        {isSpeaking ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+                        {isSpeaking ? "Speaking..." : "Repeat Question"}
                       </Button>
-                    ) : null}
-                    {responseCaptured && currentResponse && (
-                      <Button size="sm" onClick={nextQuestion} className="flex items-center gap-1">
-                        Next →
-                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Response Capture */}
+            {interviewStarted && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center justify-between">
+                    Response
+                    {isListening && (
+                      <Badge variant="secondary" className="animate-pulse">
+                        <Mic className="h-3 w-3 mr-1" />
+                        Listening...
+                      </Badge>
+                    )}
+                  </CardTitle>
+                  <CardDescription>
+                    {isListening
+                      ? "Speak clearly into your microphone..."
+                      : "Click 'Start Recording' to record your response"}
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-4">
+                    <div className="min-h-24 p-3 bg-gray-50 rounded-lg border">
+                      {currentResponse ? (
+                        <p className="text-sm text-gray-800">{currentResponse}</p>
+                      ) : (
+                        <p className="text-sm text-gray-500 italic">
+                          {isListening ? "Listening... speak now" : "Your response will appear here..."}
+                        </p>
+                      )}
+                    </div>
+
+                    {!speechRecognitionSupported || showTextInput ? (
+                      <div className="space-y-2">
+                        <textarea
+                          value={textInput}
+                          onChange={(e) => {
+                            setTextInput(e.target.value)
+                            setCurrentResponse(e.target.value)
+                          }}
+                          placeholder="Type your response here..."
+                          className="w-full min-h-24 p-3 border rounded-lg resize-none"
+                          rows={4}
+                        />
+                        <div className="flex gap-2">
+                          <Button
+                            size="sm"
+                            onClick={() => {
+                              if (textInput.trim()) {
+                                nextQuestion(textInput.trim())
+                              }
+                            }}
+                            disabled={!textInput.trim()}
+                          >
+                            Submit Response
+                          </Button>
+                          {speechRecognitionSupported && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                setShowTextInput(false)
+                                setTextInput("")
+                                setCurrentResponse("")
+                              }}
+                            >
+                              Use Voice Instead
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex gap-2">
+                        {!isListening ? (
+                          <Button
+                            size="sm"
+                            onClick={startListening}
+                            className="flex items-center gap-1"
+                            disabled={isSpeaking}
+                          >
+                            <Play className="h-3 w-3" />
+                            Start Recording
+                          </Button>
+                        ) : (
+                          <Button
+                            size="sm"
+                            onClick={stopListening}
+                            variant="destructive"
+                            className="flex items-center gap-1"
+                          >
+                            <Square className="h-3 w-3" />
+                            Stop Recording
+                          </Button>
+                        )}
+
+                        {currentResponse && (
+                          <Button
+                            size="sm"
+                            onClick={() => nextQuestion(currentResponse)}
+                            className="flex items-center gap-1"
+                          >
+                            Next →
+                          </Button>
+                        )}
+
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setShowTextInput(true)}
+                          className="flex items-center gap-1"
+                        >
+                          Type Instead
+                        </Button>
+                      </div>
                     )}
                   </div>
-                </div>
-              </CardContent>
-            </Card>
-            <div className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                id="autoAdvance"
-                checked={autoAdvanceEnabled}
-                onChange={(e) => setAutoAdvanceEnabled(e.target.checked)}
-                className="rounded"
-              />
-              <label htmlFor="autoAdvance" className="text-gray-600">
-                Auto-advance after response
-              </label>
-            </div>
-            {/* Navigation */}
-            <Card>
-              <CardContent className="pt-6">
-                <div className="space-y-3">
-                  <Button onClick={nextQuestion} className="w-full" disabled={!currentResponse.trim()}>
-                    {session.currentQuestion < session.totalQuestions - 1 ? "Next Question" : "Complete Interview"}
-                  </Button>
+                </CardContent>
+              </Card>
+            )}
 
-                  <Button onClick={() => endInterview(session.responses)} variant="outline" className="w-full">
-                    End Interview Early
-                  </Button>
+            {/* Facial Gazing Metrics */}
+            {interviewStarted && gazingEnabled && gazingMetrics && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center justify-between text-sm">
+                    <span className="flex items-center gap-2">
+                      <Eye className="h-4 w-4" />
+                      Live Gazing Analysis
+                    </span>
+                    <Badge variant={gazingMetrics.attentionScore >= 80 ? "default" : "secondary"}>
+                      {gazingMetrics.attentionScore}% Attention
+                    </Badge>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div>
+                      <span className="text-gray-600">Eye Contact:</span>
+                      <span className="font-medium ml-1 text-green-600">{gazingMetrics.eyeContact}%</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-600">Blink Rate:</span>
+                      <span className="font-medium ml-1">{gazingMetrics.blinkRate}/min</span>
+                    </div>
+                  </div>
+
+                  <div className="flex gap-1">
+                    <Badge variant={gazingMetrics.eyesDetected ? "default" : "destructive"} className="text-xs">
+                      {gazingMetrics.eyesDetected ? "Eyes OK" : "No Eyes"}
+                    </Badge>
+                    <Badge variant={gazingMetrics.facingCamera ? "default" : "secondary"} className="text-xs">
+                      {gazingMetrics.facingCamera ? "Facing Camera" : "Not Facing"}
+                    </Badge>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {interviewStarted && (
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    id="autoAdvance"
+                    checked={autoAdvanceEnabled}
+                    onChange={(e) => setAutoAdvanceEnabled(e.target.checked)}
+                    className="rounded"
+                  />
+                  <label htmlFor="autoAdvance" className="text-gray-600">
+                    Auto-advance after 3 seconds of silence
+                  </label>
                 </div>
-              </CardContent>
-            </Card>
+
+                <div className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    id="gazingEnabled"
+                    checked={gazingEnabled}
+                    onChange={(e) => setGazingEnabled(e.target.checked)}
+                    className="rounded"
+                  />
+                  <label htmlFor="gazingEnabled" className="text-gray-600">
+                    Enable facial gazing analysis
+                  </label>
+                </div>
+              </div>
+            )}
+
+            {/* Navigation */}
+            {interviewStarted && (
+              <Card>
+                <CardContent className="pt-6">
+                  <div className="space-y-3">
+                    <Button
+                      onClick={() => nextQuestion(currentResponse)}
+                      className="w-full"
+                      disabled={!currentResponse.trim()}
+                    >
+                      {session.currentQuestion < session.totalQuestions - 1 ? "Next Question" : "Complete Interview"}
+                    </Button>
+
+                    <Button onClick={() => endInterview(session.responses)} variant="outline" className="w-full">
+                      End Interview Early
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
           </div>
         </div>
       </div>
