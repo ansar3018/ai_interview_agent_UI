@@ -57,6 +57,7 @@ export default function ConductInterviewPage() {
   const [gazingMetrics, setGazingMetrics] = useState<any>(null)
   const [gazingEnabled, setGazingEnabled] = useState(true)
   const [trackingOn, setTrackingOn] = useState(true)
+  const [microphoneStatus, setMicrophoneStatus] = useState<'unknown' | 'working' | 'not-working'>('unknown')
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const mediaStreamRef = useRef<MediaStream | null>(null)
@@ -112,9 +113,22 @@ export default function ConductInterviewPage() {
 
   const setupMediaDevices = async () => {
     try {
+      // First check if we have microphone permissions
+      const permissions = await navigator.permissions.query({ name: 'microphone' as PermissionName })
+      
+      if (permissions.state === 'denied') {
+        setError("Microphone permission denied. Please allow microphone access in your browser settings.")
+        return
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
-        audio: true,
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 44100,
+        },
       })
 
       mediaStreamRef.current = stream
@@ -122,9 +136,94 @@ export default function ConductInterviewPage() {
       if (videoRef.current) {
         videoRef.current.srcObject = stream
       }
+
+      // Test microphone audio levels
+      const audioContext = new AudioContext()
+      const source = audioContext.createMediaStreamSource(stream)
+      const analyser = audioContext.createAnalyser()
+      source.connect(analyser)
+      
+      const dataArray = new Uint8Array(analyser.frequencyBinCount)
+      analyser.getByteFrequencyData(dataArray)
+      
+      // Check if we're getting audio input
+      const audioLevel = dataArray.reduce((a, b) => a + b) / dataArray.length
+      console.log("Audio level detected:", audioLevel)
+      
+      if (audioLevel < 10) {
+        console.warn("Low audio level detected - microphone may not be working properly")
+      }
+
+      // Run microphone test
+      setTimeout(() => {
+        testMicrophone()
+      }, 1000)
+
     } catch (error) {
       console.error("Failed to access media devices:", error)
-      setError("Failed to access camera/microphone. Please allow permissions and refresh the page.")
+      if (error instanceof Error) {
+        if (error.name === 'NotAllowedError') {
+          setError("Microphone permission denied. Please allow microphone access and refresh the page.")
+        } else if (error.name === 'NotFoundError') {
+          setError("No microphone found. Please check your microphone and try again.")
+        } else {
+          setError("Failed to access camera/microphone. Please check your permissions and refresh the page.")
+        }
+      } else {
+        setError("Failed to access camera/microphone. Please allow permissions and refresh the page.")
+      }
+    }
+  }
+
+  const testMicrophone = async () => {
+    try {
+      setMicrophoneStatus('unknown')
+      
+      if (!mediaStreamRef.current) {
+        setMicrophoneStatus('not-working')
+        return
+      }
+
+      const audioContext = new AudioContext()
+      const source = audioContext.createMediaStreamSource(mediaStreamRef.current)
+      const analyser = audioContext.createAnalyser()
+      source.connect(analyser)
+      
+      analyser.fftSize = 256
+      const bufferLength = analyser.frequencyBinCount
+      const dataArray = new Uint8Array(bufferLength)
+      
+      let audioDetected = false
+      let testDuration = 0
+      const maxTestDuration = 3000 // 3 seconds
+      
+      const testInterval = setInterval(() => {
+        analyser.getByteFrequencyData(dataArray)
+        const average = dataArray.reduce((a, b) => a + b) / bufferLength
+        
+        if (average > 5) {
+          audioDetected = true
+        }
+        
+        testDuration += 100
+        
+        if (testDuration >= maxTestDuration) {
+          clearInterval(testInterval)
+          audioContext.close()
+          
+          if (audioDetected) {
+            setMicrophoneStatus('working')
+            console.log("Microphone test passed")
+          } else {
+            setMicrophoneStatus('not-working')
+            console.warn("Microphone test failed - no audio detected")
+          }
+        }
+      }, 100)
+      
+    } catch (error) {
+      console.error("Microphone test failed:", error)
+      setMicrophoneStatus('not-working')
     }
   }
 
@@ -150,6 +249,10 @@ export default function ConductInterviewPage() {
     recognition.interimResults = true
     recognition.lang = "en-US"
     recognition.maxAlternatives = 1
+
+    // Add these properties to improve reliability
+    recognition.serviceURI = ""
+    recognition.grammars = null
 
     recognition.onstart = () => {
       console.log("Speech recognition started")
@@ -243,7 +346,10 @@ export default function ConductInterviewPage() {
             console.log("No-speech error but we have transcript, ignoring")
             return
           }
-          setError("No speech detected. Please check your microphone and try speaking again.")
+          // Only show error if we've been trying for a while
+          if (isListening) {
+            setError("No speech detected. Please check your microphone and try speaking again.")
+          }
           break
         case "network":
           setError("Network error. Please check your internet connection.")
@@ -308,26 +414,44 @@ export default function ConductInterviewPage() {
     setCurrentResponse("")
     currentTranscript.current = ""
 
-    try {
-      const recognition = createSpeechRecognition()
-      if (recognition) {
-        speechRecognitionRef.current = recognition
+    const startRecognition = (retryCount = 0) => {
+      try {
+        const recognition = createSpeechRecognition()
+        if (recognition) {
+          speechRecognitionRef.current = recognition
 
-        // Add a small delay to ensure microphone is ready
-        setTimeout(() => {
-          try {
-            recognition.start()
-          } catch (startError) {
-            console.error("Failed to start recognition:", startError)
-            setError("Failed to start speech recognition. Please try again.")
-            setIsListening(false)
-          }
-        }, 100)
+          // Add a small delay to ensure microphone is ready
+          setTimeout(() => {
+            try {
+              recognition.start()
+            } catch (startError) {
+              console.error("Failed to start recognition:", startError)
+              
+              // Retry up to 3 times
+              if (retryCount < 3) {
+                console.log(`Retrying speech recognition (attempt ${retryCount + 1})`)
+                setTimeout(() => startRecognition(retryCount + 1), 1000)
+              } else {
+                setError("Failed to start speech recognition after multiple attempts. Please try again.")
+                setIsListening(false)
+              }
+            }
+          }, 100)
+        }
+      } catch (error) {
+        console.error("Failed to create speech recognition:", error)
+        
+        // Retry up to 3 times
+        if (retryCount < 3) {
+          console.log(`Retrying speech recognition creation (attempt ${retryCount + 1})`)
+          setTimeout(() => startRecognition(retryCount + 1), 1000)
+        } else {
+          setError("Failed to initialize speech recognition. Please try again.")
+        }
       }
-    } catch (error) {
-      console.error("Failed to create speech recognition:", error)
-      setError("Failed to initialize speech recognition. Please try again.")
     }
+
+    startRecognition()
   }
 
   const stopListening = () => {
@@ -574,12 +698,23 @@ export default function ConductInterviewPage() {
                 <CardHeader>
                   <CardTitle className="flex items-center justify-between">
                     Response
-                    {isListening && (
-                      <Badge variant="secondary" className="animate-pulse">
-                        <Mic className="h-3 w-3 mr-1" />
-                        Listening...
-                      </Badge>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {isListening && (
+                        <Badge variant="secondary" className="animate-pulse">
+                          <Mic className="h-3 w-3 mr-1" />
+                          Listening...
+                        </Badge>
+                      )}
+                      {microphoneStatus !== 'unknown' && (
+                        <Badge 
+                          variant={microphoneStatus === 'working' ? 'default' : 'destructive'}
+                          className="text-xs"
+                        >
+                          <Mic className="h-3 w-3 mr-1" />
+                          {microphoneStatus === 'working' ? 'Mic OK' : 'Mic Issue'}
+                        </Badge>
+                      )}
+                    </div>
                   </CardTitle>
                   <CardDescription>
                     {isListening
@@ -679,6 +814,16 @@ export default function ConductInterviewPage() {
                           className="flex items-center gap-1"
                         >
                           Type Instead
+                        </Button>
+
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={testMicrophone}
+                          className="flex items-center gap-1"
+                        >
+                          <Mic className="h-3 w-3" />
+                          Test Mic
                         </Button>
                       </div>
                     )}
