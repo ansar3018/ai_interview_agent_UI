@@ -1,15 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import {
   FilesetResolver,
   FaceLandmarker,
   FaceLandmarkerResult,
 } from "@mediapipe/tasks-vision";
-import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
-import { Eye, EyeOff, AlertTriangle, CheckCircle } from "lucide-react";
 
 interface GazingMetrics {
   eyeContact: number;
@@ -20,20 +16,12 @@ interface GazingMetrics {
 }
 
 interface FaceTrackerProps {
-  videoRef: React.RefObject<HTMLVideoElement>;
+  videoRef: React.RefObject<HTMLVideoElement | null>; // Update the type to allow null
   isActive: boolean;
   onMetricsUpdate?: (metrics: GazingMetrics) => void;
 }
 
 export function FaceTracker({ videoRef, isActive, onMetricsUpdate }: FaceTrackerProps) {
-  const [metrics, setMetrics] = useState<GazingMetrics>({
-    eyeContact: 0,
-    blinkRate: 0,
-    attentionScore: 0,
-    eyesDetected: false,
-    facingCamera: false,
-  });
-
   const frameCountRef = useRef(0);
   const blinkCountRef = useRef(0);
   const lastEyeOpenAvg = useRef(1);
@@ -66,11 +54,18 @@ export function FaceTracker({ videoRef, isActive, onMetricsUpdate }: FaceTracker
 
       const processFrame = () => {
         if (!videoRef.current || !running) return;
-
+        // Only process if video is ready and has size
+        if (
+          videoRef.current.readyState < 2 ||
+          videoRef.current.videoWidth === 0 ||
+          videoRef.current.videoHeight === 0
+        ) {
+          animationFrameRef.current = requestAnimationFrame(processFrame);
+          return;
+        }
         const now = performance.now();
         const result = faceLandmarker.detectForVideo(videoRef.current, now);
         handleResults(result);
-
         animationFrameRef.current = requestAnimationFrame(processFrame);
       };
 
@@ -90,7 +85,8 @@ export function FaceTracker({ videoRef, isActive, onMetricsUpdate }: FaceTracker
     frameCountRef.current += 1;
 
     if (!result.faceLandmarks || result.faceLandmarks.length === 0) {
-      setMetrics((m) => ({ ...m, eyesDetected: false, facingCamera: false }));
+      const emptyMetrics = { eyeContact: 0, blinkRate: 0, attentionScore: 0, eyesDetected: false, facingCamera: false };
+      onMetricsUpdate?.(emptyMetrics);
       return;
     }
 
@@ -103,12 +99,17 @@ export function FaceTracker({ videoRef, isActive, onMetricsUpdate }: FaceTracker
     lastEyeOpenAvg.current = eyeOpenAvg;
     if (blinked) blinkCountRef.current += 1;
 
-    const eyeContact = Math.min(100, Math.round(eyeOpenAvg * 300));
+    // --- New scoring logic for higher attention when facing camera ---
+    // Normalize eyeOpenAvg: typical open is ~0.18-0.22, closed <0.13
+    // We'll map 0.13 (closed) to 0, 0.22 (open) to 1
+    // Use robust scaling for eyeContact and attentionScore
+    const eyeContact = Math.min(100, Math.round(eyeOpenAvg * 400));
     const blinkRate = Math.round(
       (blinkCountRef.current / (frameCountRef.current / 30)) * 60
     ); // per minute
 
-    const attentionScore = Math.round(eyeContact * 0.6 + (eyeOpenAvg > 0.15 ? 30 : 0));
+    // Give a strong bonus for open eyes (facing camera)
+    const attentionScore = Math.round(eyeContact * 0.7 + (eyeOpenAvg > 0.15 ? 30 : 0));
 
     const updated: GazingMetrics = {
       eyeContact,
@@ -118,7 +119,6 @@ export function FaceTracker({ videoRef, isActive, onMetricsUpdate }: FaceTracker
       facingCamera: true,
     };
 
-    setMetrics(updated);
     onMetricsUpdate?.(updated);
   };
 
@@ -128,71 +128,52 @@ export function FaceTracker({ videoRef, isActive, onMetricsUpdate }: FaceTracker
     return Math.hypot(t.x - b.x, t.y - b.y);
   };
 
-  const getAttentionColor = (score: number) => {
-    return score >= 80
-      ? "text-green-600"
-      : score >= 60
-      ? "text-yellow-600"
-      : "text-red-600";
-  };
-
-  const getAttentionIcon = (score: number) => {
-    return score >= 80 ? (
-      <CheckCircle className="h-4 w-4 text-green-600" />
-    ) : score >= 60 ? (
-      <AlertTriangle className="h-4 w-4 text-yellow-600" />
-    ) : (
-      <AlertTriangle className="h-4 w-4 text-red-600" />
-    );
-  };
-
   if (!isActive) return null;
+  return null;
+}
 
+export function RealTimeFaceTrackingCard({ metrics }: { metrics: GazingMetrics }) {
   return (
-    <Card className="absolute top-2 right-2 w-64 shadow-md bg-white z-10">
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-sm">
-          <Eye className="h-4 w-4" />
-          Real-Time Face Tracking
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <div className="flex items-center justify-between">
-          <span>Attention Score</span>
-          <div className="flex items-center gap-1">
-            {getAttentionIcon(metrics.attentionScore)}
-            <span className={`font-bold ${getAttentionColor(metrics.attentionScore)}`}>
-              {metrics.attentionScore}%
-            </span>
-          </div>
+    <div className="mb-4 flex justify-center">
+      <div className="w-full max-w-md bg-white/80 backdrop-blur-xl shadow-xl border-0 ring-1 ring-indigo-100 rounded-2xl px-4 py-3 flex flex-col gap-2 min-h-0">
+        <div className="flex flex-col items-center gap-1">
+          <span className="bg-gradient-to-br from-indigo-200 to-blue-200 rounded-full p-2 shadow mb-1">
+            <svg className="h-5 w-5 text-indigo-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
+          </span>
+          <span className="text-base font-bold text-indigo-900 tracking-tight">Real-Time Face Tracking</span>
         </div>
-        <Progress value={metrics.attentionScore} className="h-2" />
-
-        <div className="grid grid-cols-2 gap-3 text-xs">
-          <div>
-            <div className="flex justify-between">
-              <span>Eye Contact</span>
-              <span className="font-medium">{metrics.eyeContact}%</span>
-            </div>
-            <Progress value={metrics.eyeContact} className="h-1" />
-          </div>
-          <div>
-            <div className="flex justify-between">
-              <span>Blink Rate</span>
-              <span className="font-medium">{metrics.blinkRate}/min</span>
+        <div className="flex flex-row items-center justify-between gap-3">
+          {/* Main stats */}
+          <div className="flex-1 flex flex-col items-center gap-1">
+            <span className="text-xs text-gray-500 font-semibold">Attention</span>
+            <span className={`text-xl font-extrabold tracking-tight ${metrics.attentionScore >= 80 ? "text-green-600" : metrics.attentionScore >= 60 ? "text-yellow-600" : "text-red-600"}`}>{metrics.attentionScore}%</span>
+            <div className="w-16 h-1 bg-gray-200 rounded-full overflow-hidden">
+              <div className={`h-1 rounded-full transition-all duration-300 ${metrics.attentionScore >= 80 ? "bg-green-400" : metrics.attentionScore >= 60 ? "bg-yellow-400" : "bg-red-400"}`} style={{ width: `${metrics.attentionScore}%` }} />
             </div>
           </div>
+          <div className="flex-1 flex flex-col items-center gap-1">
+            <span className="text-xs text-gray-500 font-semibold">Eye Contact</span>
+            <span className="text-lg font-bold text-blue-700 tracking-tight">{metrics.eyeContact}%</span>
+            <div className="w-12 h-1 bg-gray-200 rounded-full overflow-hidden">
+              <div className="h-1 rounded-full bg-blue-400 transition-all duration-300" style={{ width: `${metrics.eyeContact}%` }} />
+            </div>
+          </div>
+          <div className="flex-1 flex flex-col items-center gap-1">
+            <span className="text-xs text-gray-500 font-semibold">Blink Rate</span>
+            <span className="text-lg font-bold text-indigo-700 tracking-tight">{metrics.blinkRate}/min</span>
+          </div>
         </div>
-
-        <div className="flex gap-1 text-xs">
-          <Badge variant={metrics.eyesDetected ? "default" : "destructive"}>
+        <div className="flex flex-row items-center justify-center gap-2 mt-1">
+          <span className={`flex items-center gap-1 px-3 py-1 rounded-full text-xs font-semibold shadow ${metrics.eyesDetected ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}`}>
+            <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
             {metrics.eyesDetected ? "Eyes Detected" : "Eyes Not Detected"}
-          </Badge>
-          <Badge variant={metrics.facingCamera ? "default" : "secondary"}>
+          </span>
+          <span className={`flex items-center gap-1 px-3 py-1 rounded-full text-xs font-semibold shadow ${metrics.facingCamera ? "bg-green-100 text-green-800" : "bg-yellow-100 text-yellow-800"}`}>
+            <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" /></svg>
             {metrics.facingCamera ? "Facing Camera" : "Not Facing"}
-          </Badge>
+          </span>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }
