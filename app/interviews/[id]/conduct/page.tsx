@@ -21,7 +21,7 @@ import {
   Eye,
 } from "lucide-react"
 import { useParams, useRouter } from "next/navigation"
-import { FaceTracker } from "@/components/facial-gazing/face-tracker"
+import { FaceTracker, RealTimeFaceTrackingCard } from "@/components/facial-gazing/face-tracker"
 
 interface InterviewSession {
   id: string
@@ -54,9 +54,17 @@ export default function ConductInterviewPage() {
   const [showTextInput, setShowTextInput] = useState(false)
   const [textInput, setTextInput] = useState("")
 
-  const [gazingMetrics, setGazingMetrics] = useState<any>(null)
+  const [gazingMetrics, setGazingMetrics] = useState({
+    eyeContact: 0,
+    blinkRate: 0,
+    attentionScore: 0,
+    eyesDetected: false,
+    facingCamera: false,
+  })
   const [gazingEnabled, setGazingEnabled] = useState(true)
   const [trackingOn, setTrackingOn] = useState(true)
+  const [microphoneStatus, setMicrophoneStatus] = useState<'unknown' | 'working' | 'not-working'>('unknown')
+  const [videoReady, setVideoReady] = useState(false)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const mediaStreamRef = useRef<MediaStream | null>(null)
@@ -74,6 +82,18 @@ export default function ConductInterviewPage() {
       cleanup()
     }
   }, [])
+
+  useEffect(() => {
+    // eslint-disable-next-line no-console
+    console.log("ConductInterviewPage: rendering FaceTracker", {
+      isActive: isVideoEnabled,
+      hasVideo: !!videoRef.current
+    });
+    if (!videoRef.current) {
+      // eslint-disable-next-line no-console
+      console.warn("ConductInterviewPage: videoRef.current is null at FaceTracker mount");
+    }
+  }, [isVideoEnabled, videoRef.current])
 
   const initializeInterview = async () => {
     try {
@@ -112,9 +132,22 @@ export default function ConductInterviewPage() {
 
   const setupMediaDevices = async () => {
     try {
+      // First check if we have microphone permissions
+      const permissions = await navigator.permissions.query({ name: 'microphone' as PermissionName })
+      
+      if (permissions.state === 'denied') {
+        setError("Microphone permission denied. Please allow microphone access in your browser settings.")
+        return
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
-        audio: true,
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 44100,
+        },
       })
 
       mediaStreamRef.current = stream
@@ -122,9 +155,94 @@ export default function ConductInterviewPage() {
       if (videoRef.current) {
         videoRef.current.srcObject = stream
       }
+
+      // Test microphone audio levels
+      const audioContext = new AudioContext()
+      const source = audioContext.createMediaStreamSource(stream)
+      const analyser = audioContext.createAnalyser()
+      source.connect(analyser)
+      
+      const dataArray = new Uint8Array(analyser.frequencyBinCount)
+      analyser.getByteFrequencyData(dataArray)
+      
+      // Check if we're getting audio input
+      const audioLevel = dataArray.reduce((a, b) => a + b) / dataArray.length
+      console.log("Audio level detected:", audioLevel)
+      
+      if (audioLevel < 10) {
+        console.warn("Low audio level detected - microphone may not be working properly")
+      }
+
+      // Run microphone test
+      setTimeout(() => {
+        testMicrophone()
+      }, 1000)
+
     } catch (error) {
       console.error("Failed to access media devices:", error)
-      setError("Failed to access camera/microphone. Please allow permissions and refresh the page.")
+      if (error instanceof Error) {
+        if (error.name === 'NotAllowedError') {
+          setError("Microphone permission denied. Please allow microphone access and refresh the page.")
+        } else if (error.name === 'NotFoundError') {
+          setError("No microphone found. Please check your microphone and try again.")
+        } else {
+          setError("Failed to access camera/microphone. Please check your permissions and refresh the page.")
+        }
+      } else {
+        setError("Failed to access camera/microphone. Please allow permissions and refresh the page.")
+      }
+    }
+  }
+
+  const testMicrophone = async () => {
+    try {
+      setMicrophoneStatus('unknown')
+      
+      if (!mediaStreamRef.current) {
+        setMicrophoneStatus('not-working')
+        return
+      }
+
+      const audioContext = new AudioContext()
+      const source = audioContext.createMediaStreamSource(mediaStreamRef.current)
+      const analyser = audioContext.createAnalyser()
+      source.connect(analyser)
+      
+      analyser.fftSize = 256
+      const bufferLength = analyser.frequencyBinCount
+      const dataArray = new Uint8Array(bufferLength)
+      
+      let audioDetected = false
+      let testDuration = 0
+      const maxTestDuration = 3000 // 3 seconds
+      
+      const testInterval = setInterval(() => {
+        analyser.getByteFrequencyData(dataArray)
+        const average = dataArray.reduce((a, b) => a + b) / bufferLength
+        
+        if (average > 5) {
+          audioDetected = true
+        }
+        
+        testDuration += 100
+        
+        if (testDuration >= maxTestDuration) {
+          clearInterval(testInterval)
+          audioContext.close()
+          
+          if (audioDetected) {
+            setMicrophoneStatus('working')
+            console.log("Microphone test passed")
+          } else {
+            setMicrophoneStatus('not-working')
+            console.warn("Microphone test failed - no audio detected")
+          }
+        }
+      }, 100)
+      
+    } catch (error) {
+      console.error("Microphone test failed:", error)
+      setMicrophoneStatus('not-working')
     }
   }
 
@@ -150,6 +268,9 @@ export default function ConductInterviewPage() {
     recognition.interimResults = true
     recognition.lang = "en-US"
     recognition.maxAlternatives = 1
+
+    // Add these properties to improve reliability
+    recognition.serviceURI = ""
 
     recognition.onstart = () => {
       console.log("Speech recognition started")
@@ -243,7 +364,10 @@ export default function ConductInterviewPage() {
             console.log("No-speech error but we have transcript, ignoring")
             return
           }
-          setError("No speech detected. Please check your microphone and try speaking again.")
+          // Only show error if we've been trying for a while
+          if (isListening) {
+            setError("No speech detected. Please check your microphone and try speaking again.")
+          }
           break
         case "network":
           setError("Network error. Please check your internet connection.")
@@ -308,26 +432,44 @@ export default function ConductInterviewPage() {
     setCurrentResponse("")
     currentTranscript.current = ""
 
-    try {
-      const recognition = createSpeechRecognition()
-      if (recognition) {
-        speechRecognitionRef.current = recognition
+    const startRecognition = (retryCount = 0) => {
+      try {
+        const recognition = createSpeechRecognition()
+        if (recognition) {
+          speechRecognitionRef.current = recognition
 
-        // Add a small delay to ensure microphone is ready
-        setTimeout(() => {
-          try {
-            recognition.start()
-          } catch (startError) {
-            console.error("Failed to start recognition:", startError)
-            setError("Failed to start speech recognition. Please try again.")
-            setIsListening(false)
-          }
-        }, 100)
+          // Add a small delay to ensure microphone is ready
+          setTimeout(() => {
+            try {
+              recognition.start()
+            } catch (startError) {
+              console.error("Failed to start recognition:", startError)
+              
+              // Retry up to 3 times
+              if (retryCount < 3) {
+                console.log(`Retrying speech recognition (attempt ${retryCount + 1})`)
+                setTimeout(() => startRecognition(retryCount + 1), 1000)
+              } else {
+                setError("Failed to start speech recognition after multiple attempts. Please try again.")
+                setIsListening(false)
+              }
+            }
+          }, 100)
+        }
+      } catch (error) {
+        console.error("Failed to create speech recognition:", error)
+        
+        // Retry up to 3 times
+        if (retryCount < 3) {
+          console.log(`Retrying speech recognition creation (attempt ${retryCount + 1})`)
+          setTimeout(() => startRecognition(retryCount + 1), 1000)
+        } else {
+          setError("Failed to initialize speech recognition. Please try again.")
+        }
       }
-    } catch (error) {
-      console.error("Failed to create speech recognition:", error)
-      setError("Failed to initialize speech recognition. Please try again.")
     }
+
+    startRecognition()
   }
 
   const stopListening = () => {
@@ -451,88 +593,96 @@ export default function ConductInterviewPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 p-4">
-      <div className="max-w-6xl mx-auto">
+    <div className="min-h-screen bg-gradient-to-br from-indigo-100 via-white to-blue-100 p-6">
+      <div className="max-w-6xl mx-auto flex flex-col gap-8">
         {/* Error Display */}
         {error && (
-          <Alert variant="destructive" className="mb-6">
+          <Alert variant="destructive" className="mb-6 shadow-lg rounded-xl">
             <AlertDescription>{error}</AlertDescription>
           </Alert>
         )}
 
         {/* Header */}
-        <div className="mb-6">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h1 className="text-2xl font-bold">Live Interview</h1>
-              <p className="text-gray-600">{session.position}</p>
-            </div>
-            <div className="flex items-center gap-4">
-              <Badge variant="secondary" className="flex items-center gap-1">
-                <Clock className="h-3 w-3" />
-                {Math.floor(session.duration / 60)}:{(session.duration % 60).toString().padStart(2, "0")}
-              </Badge>
-              <Badge className="bg-green-100 text-green-800">Live</Badge>
-            </div>
+        <div className="mb-2 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-extrabold text-indigo-900 drop-shadow-lg">Live Interview</h1>
+            <p className="text-lg text-gray-600 font-medium">{session.position}</p>
           </div>
-
-          <Progress value={(session.currentQuestion / session.totalQuestions) * 100} className="h-2" />
-          <p className="text-sm text-gray-500 mt-1">
-            Question {session.currentQuestion + 1} of {session.totalQuestions}
-          </p>
+          <div className="flex items-center gap-4">
+            <Badge variant="secondary" className="flex items-center gap-1 text-base px-4 py-2 rounded-xl bg-indigo-50 text-indigo-700">
+              <Clock className="h-4 w-4" />
+              {Math.floor(session.duration / 60)}:{(session.duration % 60).toString().padStart(2, "0")}
+            </Badge>
+            <Badge className="bg-green-100 text-green-800 text-base px-4 py-2 rounded-xl">Live</Badge>
+          </div>
         </div>
+        <Progress value={(session.currentQuestion / session.totalQuestions) * 100} className="h-3 rounded-full bg-indigo-200" />
+        <p className="text-md text-gray-500 mt-1 font-medium">
+          Question {session.currentQuestion + 1} of {session.totalQuestions}
+        </p>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           {/* Video Feed */}
-          <div className="lg:col-span-2">
-            <Card>
+          <div className="lg:col-span-2 flex flex-col gap-6">
+            <Card className="bg-white/70 backdrop-blur-lg shadow-2xl border-0 ring-1 ring-indigo-100 rounded-2xl">
               <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <User className="h-5 w-5" />
+                <CardTitle className="flex items-center gap-2 text-indigo-900 drop-shadow-lg text-2xl font-bold">
+                  <User className="h-6 w-6" />
                   Candidate Video
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="relative bg-black rounded-lg overflow-hidden aspect-video">
-                  <video ref={videoRef} autoPlay muted className="w-full h-full object-cover" />
-
-                  {/* Add this after the video element and before the controls */}
-                  {gazingEnabled && (
-                    <FaceTracker videoRef={videoRef} isActive={interviewStarted} onMetricsUpdate={setGazingMetrics} />
-                  )}
+                <div className="relative bg-black rounded-xl overflow-hidden aspect-video border-2 border-indigo-100 shadow-xl">
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    muted
+                    className="w-full h-full object-cover rounded-xl"
+                    onLoadedMetadata={() => setVideoReady(true)}
+                  />
 
                   {!isVideoEnabled && (
-                    <div className="absolute inset-0 bg-gray-800 flex items-center justify-center">
-                      <VideoOff className="h-12 w-12 text-gray-400" />
+                    <div className="absolute inset-0 bg-gradient-to-br from-gray-800/80 to-gray-900/80 flex items-center justify-center">
+                      <VideoOff className="h-16 w-16 text-gray-400" />
                     </div>
                   )}
 
                   {/* Controls */}
-                  <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 flex gap-2">
-                    <Button size="sm" variant={isVideoEnabled ? "secondary" : "destructive"} onClick={toggleVideo}>
-                      {isVideoEnabled ? <Video className="h-4 w-4" /> : <VideoOff className="h-4 w-4" />}
+                  <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 flex gap-4">
+                    <Button size="lg" variant={isVideoEnabled ? "secondary" : "destructive"} onClick={() => toggleVideo()} className="rounded-full shadow-md px-6 py-2 text-lg">
+                      {isVideoEnabled ? <Video className="h-5 w-5" /> : <VideoOff className="h-5 w-5" />}
                     </Button>
 
-                    <Button size="sm" variant={isAudioEnabled ? "secondary" : "destructive"} onClick={toggleAudio}>
-                      {isAudioEnabled ? <Mic className="h-4 w-4" /> : <MicOff className="h-4 w-4" />}
+                    <Button size="lg" variant={isAudioEnabled ? "secondary" : "destructive"} onClick={() => toggleAudio()} className="rounded-full shadow-md px-6 py-2 text-lg">
+                      {isAudioEnabled ? <Mic className="h-5 w-5" /> : <MicOff className="h-5 w-5" />}
                     </Button>
                   </div>
                 </div>
               </CardContent>
             </Card>
+            {/* Real-Time Face Tracking Card above current question, only if session is in progress */}
+            {session && session.status === "in_progress" && videoReady && videoRef.current && (
+              <FaceTracker
+                videoRef={videoRef}
+                isActive={isVideoEnabled}
+                onMetricsUpdate={setGazingMetrics}
+              />
+            )}
+            {interviewStarted && gazingEnabled && gazingMetrics && (
+              <RealTimeFaceTrackingCard metrics={gazingMetrics} />
+            )}
           </div>
-
           {/* Interview Control */}
-          <div className="space-y-6">
+          <div className="lg:col-span-1 space-y-8">
             {/* Start Interview */}
             {!interviewStarted && (
-              <Card className="border-green-200 bg-green-50">
+              <Card className="border-green-200 bg-green-50 shadow-xl rounded-2xl">
                 <CardHeader>
-                  <CardTitle className="text-green-800">Ready to Start?</CardTitle>
-                  <CardDescription>Click the button below to begin your interview</CardDescription>
+                  <CardTitle className="text-green-800 text-xl font-bold">Ready to Start?</CardTitle>
+                  <CardDescription className="text-base">Click the button below to begin your interview</CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <Button onClick={startInterview} className="w-full bg-green-600 hover:bg-green-700">
+                  <Button onClick={startInterview} className="w-full bg-green-600 hover:bg-green-700 text-lg py-3 rounded-xl">
                     Start Interview
                   </Button>
                 </CardContent>
@@ -541,25 +691,26 @@ export default function ConductInterviewPage() {
 
             {/* Current Question */}
             {interviewStarted && (
-              <Card>
+              <Card className="shadow-xl rounded-2xl bg-white/80 backdrop-blur-md">
                 <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <MessageSquare className="h-5 w-5" />
+                  <CardTitle className="flex items-center gap-2 text-indigo-900 text-xl font-bold">
+                    <MessageSquare className="h-6 w-6" />
                     Current Question
                   </CardTitle>
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-4">
-                    <p className="text-lg font-medium">{session.questions[session.currentQuestion]}</p>
+                    <p className="text-lg font-semibold text-gray-900 bg-indigo-50 rounded-lg p-4 shadow-sm">{session.questions[session.currentQuestion]}</p>
 
                     <div className="flex items-center gap-2">
                       <Button
-                        size="sm"
+                        size="md"
                         onClick={() => speakQuestion(session.questions[session.currentQuestion])}
                         disabled={isSpeaking}
                         variant="outline"
+                        className="rounded-lg px-4 py-2 text-base"
                       >
-                        {isSpeaking ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+                        {isSpeaking ? <VolumeX className="h-5 w-5" /> : <Volume2 className="h-5 w-5" />}
                         {isSpeaking ? "Speaking..." : "Repeat Question"}
                       </Button>
                     </div>
@@ -570,18 +721,29 @@ export default function ConductInterviewPage() {
 
             {/* Response Capture */}
             {interviewStarted && (
-              <Card>
+              <Card className="shadow-xl rounded-2xl bg-white/80 backdrop-blur-md">
                 <CardHeader>
-                  <CardTitle className="flex items-center justify-between">
+                  <CardTitle className="flex items-center justify-between text-lg font-bold">
                     Response
-                    {isListening && (
-                      <Badge variant="secondary" className="animate-pulse">
-                        <Mic className="h-3 w-3 mr-1" />
-                        Listening...
-                      </Badge>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {isListening && (
+                        <Badge variant="secondary" className="animate-pulse text-base px-3 py-1 rounded-xl">
+                          <Mic className="h-4 w-4 mr-1" />
+                          Listening...
+                        </Badge>
+                      )}
+                      {microphoneStatus !== 'unknown' && (
+                        <Badge 
+                          variant={microphoneStatus === 'working' ? 'default' : 'destructive'}
+                          className="text-base px-3 py-1 rounded-xl"
+                        >
+                          <Mic className="h-4 w-4 mr-1" />
+                          {microphoneStatus === 'working' ? 'Mic OK' : 'Mic Issue'}
+                        </Badge>
+                      )}
+                    </div>
                   </CardTitle>
-                  <CardDescription>
+                  <CardDescription className="text-base">
                     {isListening
                       ? "Speak clearly into your microphone..."
                       : "Click 'Start Recording' to record your response"}
@@ -589,11 +751,11 @@ export default function ConductInterviewPage() {
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-4">
-                    <div className="min-h-24 p-3 bg-gray-50 rounded-lg border">
+                    <div className="min-h-24 p-4 bg-gray-50 rounded-xl border shadow-sm">
                       {currentResponse ? (
-                        <p className="text-sm text-gray-800">{currentResponse}</p>
+                        <p className="text-base text-gray-800 font-medium">{currentResponse}</p>
                       ) : (
-                        <p className="text-sm text-gray-500 italic">
+                        <p className="text-base text-gray-500 italic">
                           {isListening ? "Listening... speak now" : "Your response will appear here..."}
                         </p>
                       )}
@@ -608,30 +770,32 @@ export default function ConductInterviewPage() {
                             setCurrentResponse(e.target.value)
                           }}
                           placeholder="Type your response here..."
-                          className="w-full min-h-24 p-3 border rounded-lg resize-none"
+                          className="w-full min-h-24 p-4 border rounded-xl resize-none text-base shadow-sm"
                           rows={4}
                         />
                         <div className="flex gap-2">
                           <Button
-                            size="sm"
+                            size="md"
                             onClick={() => {
                               if (textInput.trim()) {
                                 nextQuestion(textInput.trim())
                               }
                             }}
                             disabled={!textInput.trim()}
+                            className="rounded-lg px-4 py-2 text-base"
                           >
                             Submit Response
                           </Button>
                           {speechRecognitionSupported && (
                             <Button
-                              size="sm"
+                              size="md"
                               variant="outline"
                               onClick={() => {
                                 setShowTextInput(false)
                                 setTextInput("")
                                 setCurrentResponse("")
                               }}
+                              className="rounded-lg px-4 py-2 text-base"
                             >
                               Use Voice Instead
                             </Button>
@@ -642,44 +806,54 @@ export default function ConductInterviewPage() {
                       <div className="flex gap-2">
                         {!isListening ? (
                           <Button
-                            size="sm"
+                            size="md"
                             onClick={startListening}
-                            className="flex items-center gap-1"
+                            className="flex items-center gap-1 rounded-lg px-4 py-2 text-base"
                             disabled={isSpeaking}
                           >
-                            <Play className="h-3 w-3" />
+                            <Play className="h-4 w-4" />
                             Start Recording
                           </Button>
                         ) : (
                           <Button
-                            size="sm"
+                            size="md"
                             onClick={stopListening}
                             variant="destructive"
-                            className="flex items-center gap-1"
+                            className="flex items-center gap-1 rounded-lg px-4 py-2 text-base"
                           >
-                            <Square className="h-3 w-3" />
+                            <Square className="h-4 w-4" />
                             Stop Recording
                           </Button>
                         )}
 
                         {currentResponse && (
                           <Button
-                            size="sm"
+                            size="md"
                             onClick={() => nextQuestion(currentResponse)}
-                            className="flex items-center gap-1"
+                            className="flex items-center gap-1 rounded-lg px-4 py-2 text-base"
                           >
                             Next →
                           </Button>
                         )}
 
                         <Button
-                          size="sm"
+                          size="md"
                           variant="outline"
                           onClick={() => setShowTextInput(true)}
-                          className="flex items-center gap-1"
+                          className="flex items-center gap-1 rounded-lg px-4 py-2 text-base"
                         >
                           Type Instead
                         </Button>
+
+                        {/* <Button
+                          size="md"
+                          variant="outline"
+                          onClick={testMicrophone}
+                          className="flex items-center gap-1 rounded-lg px-4 py-2 textbase"
+                        >
+                          <Mic className="h-4 w-4" />
+                          Test Mic
+                        </Button> */}
                       </div>
                     )}
                   </div>
@@ -687,43 +861,8 @@ export default function ConductInterviewPage() {
               </Card>
             )}
 
-            {/* Facial Gazing Metrics */}
-            {interviewStarted && gazingEnabled && gazingMetrics && (
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center justify-between text-sm">
-                    <span className="flex items-center gap-2">
-                      <Eye className="h-4 w-4" />
-                      Live Gazing Analysis
-                    </span>
-                    <Badge variant={gazingMetrics.attentionScore >= 80 ? "default" : "secondary"}>
-                      {gazingMetrics.attentionScore}% Attention
-                    </Badge>
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  <div className="grid grid-cols-2 gap-2 text-xs">
-                    <div>
-                      <span className="text-gray-600">Eye Contact:</span>
-                      <span className="font-medium ml-1 text-green-600">{gazingMetrics.eyeContact}%</span>
-                    </div>
-                    <div>
-                      <span className="text-gray-600">Blink Rate:</span>
-                      <span className="font-medium ml-1">{gazingMetrics.blinkRate}/min</span>
-                    </div>
-                  </div>
-
-                  <div className="flex gap-1">
-                    <Badge variant={gazingMetrics.eyesDetected ? "default" : "destructive"} className="text-xs">
-                      {gazingMetrics.eyesDetected ? "Eyes OK" : "No Eyes"}
-                    </Badge>
-                    <Badge variant={gazingMetrics.facingCamera ? "default" : "secondary"} className="text-xs">
-                      {gazingMetrics.facingCamera ? "Facing Camera" : "Not Facing"}
-                    </Badge>
-                  </div>
-                </CardContent>
-              </Card>
-            )}
+            {/* Real-Time Face Tracking Card above current question, only if session is in progress */}
+            {/* Only show in main section, not here in sidebar */}
 
             {interviewStarted && (
               <div className="space-y-2">
