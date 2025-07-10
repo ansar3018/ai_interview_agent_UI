@@ -126,6 +126,10 @@ class ApiClient {
     })
   }
 
+  async getInterviewDetails(interviewId: string) {
+    return this.getInterview(interviewId);
+  }
+
   // Resume
   async uploadResume(file: File, candidateId?: string) {
     const formData = new FormData()

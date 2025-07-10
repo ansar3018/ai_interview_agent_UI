@@ -6,7 +6,6 @@ import { Eye, TrendingUp, AlertCircle } from "lucide-react"
 interface GazingSummaryData {
   attentionScore: number
   eyeContact: number
-  blinkRate: number
   engagementLevel: "High" | "Medium" | "Low"
   recommendations: string[]
 }
@@ -65,10 +64,7 @@ export function GazingSummary({ data }: GazingSummaryProps) {
             <div className="text-sm text-gray-600">Eye Contact</div>
           </div>
 
-          <div className="text-center p-3 bg-gray-50 rounded-lg">
-            <div className="text-2xl font-semibold text-blue-600">{data.blinkRate}</div>
-            <div className="text-sm text-gray-600">Avg Blinks/min</div>
-          </div>
+          {/* Remove Total Blinks UI */}
 
           <div className="text-center p-3 bg-gray-50 rounded-lg">
             <div className="text-2xl font-semibold text-purple-600">

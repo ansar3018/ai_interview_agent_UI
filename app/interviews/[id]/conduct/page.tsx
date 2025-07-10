@@ -21,7 +21,9 @@ import {
   Eye,
 } from "lucide-react"
 import { useParams, useRouter } from "next/navigation"
-import { FaceTracker, RealTimeFaceTrackingCard } from "@/components/facial-gazing/face-tracker"
+import { FaceTracker } from "@/components/facial-gazing/face-tracker"
+import { GazingSummary } from "@/components/facial-gazing/gazing-summary"
+import { apiClient } from "@/lib/api"
 
 interface InterviewSession {
   id: string
@@ -35,6 +37,50 @@ interface InterviewSession {
   isRecording: boolean
   startTime: Date | null
   duration: number
+}
+
+function generateDynamicQuestions(resumeAnalysis: any): string[] {
+  const questions: string[] = [];
+  const name = resumeAnalysis?.personal_info?.name || "candidate";
+  // 1. Greet and confirm
+  questions.push(`Hello ${name}, welcome to your interview!`);
+  questions.push(`Just to confirm, is your name ${name}?`);
+  questions.push("Are you ready to begin?");
+
+  // 2. Dynamic questions from profile
+  if (resumeAnalysis) {
+    if (resumeAnalysis.skills && resumeAnalysis.skills.length > 0) {
+      const topSkill = resumeAnalysis.skills[0].type;
+      questions.push(`I see you are an expert in ${topSkill}. Can you share a project where you used this skill?`);
+    }
+    if (resumeAnalysis.experience && resumeAnalysis.experience.length > 0) {
+      const exp = resumeAnalysis.experience[0];
+      questions.push(`You worked as a ${exp.role} at ${exp.company}. What was your biggest achievement there?`);
+      if (exp.responsibilities && exp.responsibilities.length > 0) {
+        questions.push(`Can you elaborate on: \"${exp.responsibilities[0]}\"?`);
+      }
+    }
+    if (resumeAnalysis.projects && resumeAnalysis.projects.length > 0) {
+      const proj = resumeAnalysis.projects[0];
+      questions.push(`Tell me about your project \"${proj.name}\". What challenges did you face?`);
+    }
+    if (resumeAnalysis.recommended_questions && resumeAnalysis.recommended_questions.length > 0) {
+      for (const q of resumeAnalysis.recommended_questions) {
+        questions.push(q.question);
+      }
+    }
+    if (resumeAnalysis.education && resumeAnalysis.education.length > 0) {
+      const edu = resumeAnalysis.education[0];
+      questions.push(`How did your studies at ${edu.institution} prepare you for your career?`);
+    }
+  }
+
+  // 3. Fallback only if nothing else
+  if (questions.length === 0) {
+    questions.push("Hello! Let's get started. Can you tell me about yourself?");
+  }
+
+  return questions;
 }
 
 export default function ConductInterviewPage() {
@@ -53,10 +99,12 @@ export default function ConductInterviewPage() {
   const [interviewStarted, setInterviewStarted] = useState(false)
   const [showTextInput, setShowTextInput] = useState(false)
   const [textInput, setTextInput] = useState("")
+  const [resumeAnalysis, setResumeAnalysis] = useState<any>(null)
+  const [questionWarning, setQuestionWarning] = useState<string | null>(null)
 
   const [gazingMetrics, setGazingMetrics] = useState({
     eyeContact: 0,
-    blinkRate: 0,
+    blinks: 0,
     attentionScore: 0,
     eyesDetected: false,
     facingCamera: false,
@@ -72,6 +120,7 @@ export default function ConductInterviewPage() {
   const speechRecognitionRef = useRef<any>(null)
   const currentTranscript = useRef("")
   const silenceTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const metricsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     initializeInterview()
@@ -80,6 +129,7 @@ export default function ConductInterviewPage() {
 
     return () => {
       cleanup()
+      if (metricsTimeoutRef.current) clearTimeout(metricsTimeoutRef.current);
     }
   }, [])
 
@@ -97,32 +147,48 @@ export default function ConductInterviewPage() {
 
   const initializeInterview = async () => {
     try {
-      // Mock API call - replace with actual API
-      // const response = await fetch(`/api/v1/interviews/${params.id}/start`, {
-      //   method: "POST",
-      // })
-      // if (!response.ok) {
-      //   throw new Error("Failed to start interview")
-      // }
-
-      setSession({
-        id: params.id as string,
-        candidate_id: "candidate-123",
-        position: "Software Engineer",
-        status: "in_progress",
-        currentQuestion: 0,
-        totalQuestions: 3,
-        questions: [
+      // 1. Fetch interview details using interview ID from params
+      const interviewId = params.id as string;
+      const interviewDetails = await apiClient.getInterviewDetails(interviewId); // You may need to implement this in your apiClient
+      const candidateId = interviewDetails.candidate_id;
+      const position = interviewDetails.position || "Software Engineer";
+      let questions: string[] = [];
+      let analysis: any = null;
+      try {
+        // 2. Fetch resume analysis using correct candidateId
+        analysis = await apiClient.getResumeAnalysis(candidateId);
+        setResumeAnalysis(analysis);
+        questions = generateDynamicQuestions(analysis);
+      } catch (e) {
+        setResumeAnalysis(null);
+        questions = [];
+      }
+      if (!questions || (Array.isArray(questions) && questions.length === 0)) {
+        setQuestionWarning('No dynamic questions found for this candidate. Using default questions.');
+        questions = [
           "Tell me about yourself and your background in software development.",
           "Describe a challenging technical problem you've solved recently.",
           "How do you approach debugging complex issues in your code?",
-        ],
+        ];
+      } else if (typeof questions === 'string') {
+        setQuestionWarning(questions as string);
+        questions = [questions as string];
+      } else if (Array.isArray(questions)) {
+        setQuestionWarning(null);
+      }
+      setSession({
+        id: interviewId,
+        candidate_id: candidateId,
+        position,
+        status: "in_progress",
+        currentQuestion: 0,
+        totalQuestions: questions.length,
+        questions,
         responses: [],
         isRecording: false,
         startTime: new Date(),
         duration: 0,
       })
-
       setLoading(false)
     } catch (error) {
       setError("Failed to initialize interview")
@@ -621,6 +687,12 @@ export default function ConductInterviewPage() {
           Question {session.currentQuestion + 1} of {session.totalQuestions}
         </p>
 
+        {questionWarning && (
+          <Alert variant="default" className="mb-4">
+            <AlertDescription>{questionWarning}</AlertDescription>
+          </Alert>
+        )}
+
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           {/* Video Feed */}
           <div className="lg:col-span-2 flex flex-col gap-6">
@@ -665,11 +737,34 @@ export default function ConductInterviewPage() {
               <FaceTracker
                 videoRef={videoRef}
                 isActive={isVideoEnabled}
-                onMetricsUpdate={setGazingMetrics}
+                onMetricsUpdate={(metrics) => {
+                  setGazingMetrics(metrics);
+                  if (metricsTimeoutRef.current) clearTimeout(metricsTimeoutRef.current);
+                  metricsTimeoutRef.current = setTimeout(() => {
+                    setGazingMetrics({
+                      eyeContact: 0,
+                      blinks: 0,
+                      attentionScore: 0,
+                      eyesDetected: false,
+                      facingCamera: false,
+                    });
+                  }, 4000); // Increased timeout to 4 seconds
+                }}
               />
             )}
             {interviewStarted && gazingEnabled && gazingMetrics && (
-              <RealTimeFaceTrackingCard metrics={gazingMetrics} />
+              <GazingSummary
+                data={{
+                  attentionScore: gazingMetrics.attentionScore,
+                  eyeContact: gazingMetrics.eyeContact,
+                  blinks: gazingMetrics.blinks,
+                  engagementLevel: gazingMetrics.attentionScore >= 80 ? "High" : gazingMetrics.attentionScore >= 60 ? "Medium" : "Low",
+                  recommendations: [
+                    !gazingMetrics.eyesDetected ? "Eyes Not Detected" : null,
+                    !gazingMetrics.facingCamera ? "Not Facing Camera" : null,
+                  ].filter((x): x is string => Boolean(x)),
+                }}
+              />
             )}
           </div>
           {/* Interview Control */}
