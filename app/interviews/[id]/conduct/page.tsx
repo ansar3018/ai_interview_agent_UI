@@ -19,10 +19,13 @@ import {
   User,
   MessageSquare,
   Eye,
+  Code,
 } from "lucide-react"
 import { useParams, useRouter } from "next/navigation"
 import { FaceTracker } from "@/components/facial-gazing/face-tracker"
 import { GazingSummary } from "@/components/facial-gazing/gazing-summary"
+import CodeEditor from "@/components/code-editor"
+import CodingQuestion from "@/components/coding-question"
 import { apiClient } from "@/lib/api"
 
 interface InterviewSession {
@@ -37,50 +40,6 @@ interface InterviewSession {
   isRecording: boolean
   startTime: Date | null
   duration: number
-}
-
-function generateDynamicQuestions(resumeAnalysis: any): string[] {
-  const questions: string[] = [];
-  const name = resumeAnalysis?.personal_info?.name || "candidate";
-  // 1. Greet and confirm
-  questions.push(`Hello ${name}, welcome to your interview!`);
-  questions.push(`Just to confirm, is your name ${name}?`);
-  questions.push("Are you ready to begin?");
-
-  // 2. Dynamic questions from profile
-  if (resumeAnalysis) {
-    if (resumeAnalysis.skills && resumeAnalysis.skills.length > 0) {
-      const topSkill = resumeAnalysis.skills[0].type;
-      questions.push(`I see you are an expert in ${topSkill}. Can you share a project where you used this skill?`);
-    }
-    if (resumeAnalysis.experience && resumeAnalysis.experience.length > 0) {
-      const exp = resumeAnalysis.experience[0];
-      questions.push(`You worked as a ${exp.role} at ${exp.company}. What was your biggest achievement there?`);
-      if (exp.responsibilities && exp.responsibilities.length > 0) {
-        questions.push(`Can you elaborate on: \"${exp.responsibilities[0]}\"?`);
-      }
-    }
-    if (resumeAnalysis.projects && resumeAnalysis.projects.length > 0) {
-      const proj = resumeAnalysis.projects[0];
-      questions.push(`Tell me about your project \"${proj.name}\". What challenges did you face?`);
-    }
-    if (resumeAnalysis.recommended_questions && resumeAnalysis.recommended_questions.length > 0) {
-      for (const q of resumeAnalysis.recommended_questions) {
-        questions.push(q.question);
-      }
-    }
-    if (resumeAnalysis.education && resumeAnalysis.education.length > 0) {
-      const edu = resumeAnalysis.education[0];
-      questions.push(`How did your studies at ${edu.institution} prepare you for your career?`);
-    }
-  }
-
-  // 3. Fallback only if nothing else
-  if (questions.length === 0) {
-    questions.push("Hello! Let's get started. Can you tell me about yourself?");
-  }
-
-  return questions;
 }
 
 export default function ConductInterviewPage() {
@@ -101,6 +60,10 @@ export default function ConductInterviewPage() {
   const [textInput, setTextInput] = useState("")
   const [resumeAnalysis, setResumeAnalysis] = useState<any>(null)
   const [questionWarning, setQuestionWarning] = useState<string | null>(null)
+  const [questionsHistory, setQuestionsHistory] = useState<{ question: string, answer: string }[]>([])
+  const [currentQuestion, setCurrentQuestion] = useState<string>("")
+  const [feedback, setFeedback] = useState<any>(null)
+  const [isCodingQuestionMode, setIsCodingQuestionMode] = useState(false)
 
   const [gazingMetrics, setGazingMetrics] = useState({
     eyeContact: 0,
@@ -113,6 +76,8 @@ export default function ConductInterviewPage() {
   const [trackingOn, setTrackingOn] = useState(true)
   const [microphoneStatus, setMicrophoneStatus] = useState<'unknown' | 'working' | 'not-working'>('unknown')
   const [videoReady, setVideoReady] = useState(false)
+  const [videoInitialized, setVideoInitialized] = useState(false)
+  const metricsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const mediaStreamRef = useRef<MediaStream | null>(null)
@@ -120,7 +85,6 @@ export default function ConductInterviewPage() {
   const speechRecognitionRef = useRef<any>(null)
   const currentTranscript = useRef("")
   const silenceTimeoutRef = useRef<NodeJS.Timeout | null>(null)
-  const metricsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     initializeInterview()
@@ -133,57 +97,71 @@ export default function ConductInterviewPage() {
     }
   }, [])
 
+  // Add cleanup on unmount
+  useEffect(() => {
+    return () => {
+      // Clear memory when component unmounts
+      if (session) {
+        apiClient.clearConversationMemory(session.id).catch(error => {
+          console.warn("Failed to clear conversation memory on unmount:", error);
+        });
+      }
+    };
+  }, [session]);
+
   useEffect(() => {
     // eslint-disable-next-line no-console
     console.log("ConductInterviewPage: rendering FaceTracker", {
       isActive: isVideoEnabled,
-      hasVideo: !!videoRef.current
+      hasVideo: !!videoRef.current,
+      videoReady,
+      videoInitialized
     });
     if (!videoRef.current) {
       // eslint-disable-next-line no-console
       console.warn("ConductInterviewPage: videoRef.current is null at FaceTracker mount");
     }
-  }, [isVideoEnabled, videoRef.current])
+  }, [isVideoEnabled, videoRef.current, videoReady, videoInitialized])
+
+  // Monitor videoRef initialization
+  useEffect(() => {
+    if (videoRef.current && mediaStreamRef.current && !videoReady) {
+      console.log("VideoRef is available but videoReady is false, setting up video");
+      videoRef.current.srcObject = mediaStreamRef.current;
+      setVideoReady(true);
+    }
+  }, [videoRef.current, mediaStreamRef.current, videoReady]);
 
   const initializeInterview = async () => {
     try {
-      // 1. Fetch interview details using interview ID from params
       const interviewId = params.id as string;
-      const interviewDetails = await apiClient.getInterviewDetails(interviewId); // You may need to implement this in your apiClient
+      const interviewDetails = await apiClient.getInterviewDetails(interviewId) as any;
       const candidateId = interviewDetails.candidate_id;
       const position = interviewDetails.position || "Software Engineer";
-      let questions: string[] = [];
       let analysis: any = null;
       try {
-        // 2. Fetch resume analysis using correct candidateId
         analysis = await apiClient.getResumeAnalysis(candidateId);
         setResumeAnalysis(analysis);
-        questions = generateDynamicQuestions(analysis);
       } catch (e) {
         setResumeAnalysis(null);
-        questions = [];
       }
-      if (!questions || (Array.isArray(questions) && questions.length === 0)) {
-        setQuestionWarning('No dynamic questions found for this candidate. Using default questions.');
-        questions = [
-          "Tell me about yourself and your background in software development.",
-          "Describe a challenging technical problem you've solved recently.",
-          "How do you approach debugging complex issues in your code?",
-        ];
-      } else if (typeof questions === 'string') {
-        setQuestionWarning(questions as string);
-        questions = [questions as string];
-      } else if (Array.isArray(questions)) {
-        setQuestionWarning(null);
-      }
+      // Get the first question from backend
+      const nextQ = await apiClient.getNextQuestion({
+        interview_id: interviewId,
+        resume: analysis,
+        history: [],
+        position,
+      }) as any;
+      setQuestionsHistory([])
+      setCurrentQuestion(nextQ.nextQuestion)
       setSession({
         id: interviewId,
         candidate_id: candidateId,
         position,
         status: "in_progress",
         currentQuestion: 0,
-        totalQuestions: questions.length,
-        questions,
+        totalQuestions: 1, // will update as we go
+        questions: [], // not used
         responses: [],
         isRecording: false,
         startTime: new Date(),
@@ -218,8 +196,22 @@ export default function ConductInterviewPage() {
 
       mediaStreamRef.current = stream
 
+      // Wait for videoRef to be available
       if (videoRef.current) {
         videoRef.current.srcObject = stream
+        console.log("Video stream set, videoRef.current:", videoRef.current);
+        // Set video as ready when srcObject is set
+        setVideoReady(true)
+      } else {
+        console.warn("videoRef.current is null when trying to set srcObject");
+        // Retry after a short delay
+        setTimeout(() => {
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream
+            console.log("Video stream set on retry, videoRef.current:", videoRef.current);
+            setVideoReady(true)
+          }
+        }, 100);
       }
 
       // Test microphone audio levels
@@ -557,51 +549,131 @@ export default function ConductInterviewPage() {
   }
 
   const startInterview = () => {
-    setInterviewStarted(true)
+    // Clear any existing memory for this interview before starting
     if (session) {
-      speakQuestion(session.questions[0])
+      apiClient.clearConversationMemory(session.id).catch(error => {
+        console.warn("Failed to clear conversation memory:", error);
+      });
     }
+    
+    setInterviewStarted(true)
+    speakQuestion(currentQuestion)
   }
 
-  const nextQuestion = (transcript: string) => {
+  // Detect if a question is a coding question
+  const isCodingQuestion = (question: string): boolean => {
+    const codingKeywords = [
+      "coding challenge", "technical assessment", "write a function",
+      "programming problem", "algorithm", "data structure",
+      "coding problem", "technical question", "programming challenge"
+    ]
+    
+    const lowerQuestion = question.toLowerCase()
+    return codingKeywords.some(keyword => lowerQuestion.includes(keyword))
+  }
+
+  const nextQuestion = async (transcript: string) => {
     if (!session) return
-
     stopListening()
-
-    const updatedResponses = [...session.responses, transcript]
-
-    if (session.currentQuestion < session.totalQuestions - 1) {
-      const updatedSession = {
-        ...session,
-        currentQuestion: session.currentQuestion + 1,
-        responses: updatedResponses,
-      }
-      setSession(updatedSession)
+    
+    // Check if current question was a coding question
+    if (isCodingQuestion(currentQuestion)) {
+      // For coding questions, we don't need to process the transcript
+      // The coding question component handles the submission
+      console.log("Coding question completed")
+      setIsCodingQuestionMode(false)
+    } else {
+      // Add Q&A to history for regular questions
+      const updatedHistory = [...questionsHistory, { question: currentQuestion, answer: transcript }]
+      setQuestionsHistory(updatedHistory)
       setCurrentResponse("")
       currentTranscript.current = ""
-
-      setTimeout(() => {
-        speakQuestion(updatedSession.questions[updatedSession.currentQuestion])
-      }, 1000)
+      
+      // Optionally get feedback
+      try {
+        const feedbackRes = await apiClient.getFeedback({
+          interview_id: session.id,
+          question: currentQuestion,
+          response: transcript,
+          expected_keywords: [], // Optionally fill from resumeAnalysis
+        })
+        setFeedback(feedbackRes)
+      } catch (e) {
+        setFeedback(null)
+      }
+    }
+    
+    // Check if we've reached the maximum number of questions (fallback)
+    const maxQuestions = 12
+    if (questionsHistory.length >= maxQuestions) {
+      console.log(`Interview completed after ${maxQuestions} questions (maximum limit)`)
+      endInterview(questionsHistory.map(h => h.answer))
+      return
+    }
+    
+    // Get next question from backend
+    const nextQ = await apiClient.getNextQuestion({
+      interview_id: session.id,
+      resume: resumeAnalysis,
+      history: questionsHistory,
+      position: session.position,
+    }) as any
+    
+    // Check if the interview is complete
+    if (nextQ.nextQuestion && nextQ.nextQuestion.startsWith("INTERVIEW_COMPLETE:")) {
+      // Interview is complete
+      console.log("Interview completed by AI agent")
+      endInterview(questionsHistory.map(h => h.answer))
+    } else if (nextQ.nextQuestion && !nextQ.nextQuestion.toLowerCase().includes("thank you for completing")) {
+      const newQuestion = nextQ.nextQuestion
+      setCurrentQuestion(newQuestion)
+      
+      // Check if this is a coding question
+      if (isCodingQuestion(newQuestion)) {
+        setIsCodingQuestionMode(true)
+        setFeedback(null) // Clear any previous feedback
+      } else {
+        setIsCodingQuestionMode(false)
+        setTimeout(() => {
+          speakQuestion(newQuestion)
+        }, 1000)
+      }
+      
+      setSession({
+        ...session,
+        currentQuestion: session.currentQuestion + 1,
+        totalQuestions: session.currentQuestion + 2, // increment
+      })
     } else {
-      endInterview(updatedResponses)
+      endInterview(questionsHistory.map(h => h.answer))
     }
   }
 
   const endInterview = async (finalResponses: string[]) => {
     try {
-      // await fetch(`/api/v1/interviews/${params.id}/end`, {
-      //   method: "POST",
-      // })
-
+      // Clear LangChain memory when interview ends
+      if (session) {
+        await apiClient.clearConversationMemory(session.id);
+      }
+      
       cleanup()
       router.push(`/reports/${params.id}`)
     } catch (error) {
-      setError("Failed to end interview")
+      console.error("Failed to clear conversation memory:", error);
+      // Still proceed with ending the interview even if memory clearing fails
+      cleanup()
+      router.push(`/reports/${params.id}`)
     }
   }
 
   const cleanup = () => {
+    // Clear LangChain memory on cleanup
+    if (session) {
+      apiClient.clearConversationMemory(session.id).catch(error => {
+        console.warn("Failed to clear conversation memory during cleanup:", error);
+      });
+    }
+
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach((track) => track.stop())
     }
@@ -638,6 +710,23 @@ export default function ConductInterviewPage() {
         setIsAudioEnabled(audioTrack.enabled)
       }
     }
+  }
+
+  const handleVideoLoadedMetadata = () => {
+    console.log("Video metadata loaded, videoRef.current:", videoRef.current);
+    setVideoReady(true)
+    setVideoInitialized(true)
+  }
+
+  const handleVideoCanPlay = () => {
+    console.log("Video can play, videoRef.current:", videoRef.current);
+    setVideoReady(true)
+    setVideoInitialized(true)
+  }
+
+  const handleVideoError = (error: any) => {
+    console.error("Video error:", error);
+    setError("Failed to load video stream");
   }
 
   if (loading) {
@@ -693,7 +782,40 @@ export default function ConductInterviewPage() {
           </Alert>
         )}
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        {/* Feedback Display */}
+        {feedback && (
+          <Alert variant="default" className="mb-4">
+            <AlertDescription>
+              <div><b>AI Feedback:</b> {feedback.feedback}</div>
+              <div>Score: {feedback.score}</div>
+              <div>Strengths: {feedback.strengths?.join(", ")}</div>
+              <div>Improvements: {feedback.improvements?.join(", ")}</div>
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {/* Coding Question Mode */}
+        {isCodingQuestionMode && session && (
+          <CodingQuestion
+            interviewId={session.id}
+            question={currentQuestion}
+            position={session.position}
+            onComplete={(feedback) => {
+              console.log("Coding question completed with feedback:", feedback)
+              // Move to next question
+              nextQuestion("")
+            }}
+            onSkip={() => {
+              console.log("Coding question skipped")
+              // Move to next question
+              nextQuestion("")
+            }}
+          />
+        )}
+
+        {/* Regular Interview Mode */}
+        {!isCodingQuestionMode && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           {/* Video Feed */}
           <div className="lg:col-span-2 flex flex-col gap-6">
             <Card className="bg-white/70 backdrop-blur-lg shadow-2xl border-0 ring-1 ring-indigo-100 rounded-2xl">
@@ -710,7 +832,9 @@ export default function ConductInterviewPage() {
                     autoPlay
                     muted
                     className="w-full h-full object-cover rounded-xl"
-                    onLoadedMetadata={() => setVideoReady(true)}
+                    onLoadedMetadata={handleVideoLoadedMetadata}
+                    onCanPlay={handleVideoCanPlay}
+                    onError={handleVideoError}
                   />
 
                   {!isVideoEnabled && (
@@ -721,11 +845,11 @@ export default function ConductInterviewPage() {
 
                   {/* Controls */}
                   <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 flex gap-4">
-                    <Button size="lg" variant={isVideoEnabled ? "secondary" : "destructive"} onClick={() => toggleVideo()} className="rounded-full shadow-md px-6 py-2 text-lg">
+                    <Button size="default" variant={isVideoEnabled ? "secondary" : "destructive"} onClick={() => toggleVideo()} className="rounded-full shadow-md px-6 py-2 text-lg">
                       {isVideoEnabled ? <Video className="h-5 w-5" /> : <VideoOff className="h-5 w-5" />}
                     </Button>
 
-                    <Button size="lg" variant={isAudioEnabled ? "secondary" : "destructive"} onClick={() => toggleAudio()} className="rounded-full shadow-md px-6 py-2 text-lg">
+                    <Button size="default" variant={isAudioEnabled ? "secondary" : "destructive"} onClick={() => toggleAudio()} className="rounded-full shadow-md px-6 py-2 text-lg">
                       {isAudioEnabled ? <Mic className="h-5 w-5" /> : <MicOff className="h-5 w-5" />}
                     </Button>
                   </div>
@@ -733,17 +857,23 @@ export default function ConductInterviewPage() {
               </CardContent>
             </Card>
             {/* Real-Time Face Tracking Card above current question, only if session is in progress */}
-            {session && session.status === "in_progress" && videoReady && videoRef.current && (
+            {session && session.status === "in_progress" && videoReady && videoInitialized && (
               <FaceTracker
-                videoRef={videoRef}
+                videoRef={videoRef as React.RefObject<HTMLVideoElement>}
                 isActive={isVideoEnabled}
                 onMetricsUpdate={(metrics) => {
-                  setGazingMetrics(metrics);
+                  setGazingMetrics({
+                    eyeContact: metrics.eyeContact || 0,
+                    blinks: 0, // Add missing blinks property
+                    attentionScore: metrics.attentionScore || 0,
+                    eyesDetected: metrics.eyesDetected || false,
+                    facingCamera: metrics.facingCamera || false,
+                  });
                   if (metricsTimeoutRef.current) clearTimeout(metricsTimeoutRef.current);
                   metricsTimeoutRef.current = setTimeout(() => {
                     setGazingMetrics({
                       eyeContact: 0,
-                      blinks: 0,
+                      blinks: 0, // Add missing blinks property
                       attentionScore: 0,
                       eyesDetected: false,
                       facingCamera: false,
@@ -757,7 +887,6 @@ export default function ConductInterviewPage() {
                 data={{
                   attentionScore: gazingMetrics.attentionScore,
                   eyeContact: gazingMetrics.eyeContact,
-                  blinks: gazingMetrics.blinks,
                   engagementLevel: gazingMetrics.attentionScore >= 80 ? "High" : gazingMetrics.attentionScore >= 60 ? "Medium" : "Low",
                   recommendations: [
                     !gazingMetrics.eyesDetected ? "Eyes Not Detected" : null,
@@ -795,12 +924,12 @@ export default function ConductInterviewPage() {
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-4">
-                    <p className="text-lg font-semibold text-gray-900 bg-indigo-50 rounded-lg p-4 shadow-sm">{session.questions[session.currentQuestion]}</p>
+                    <p className="text-lg font-semibold text-gray-900 bg-indigo-50 rounded-lg p-4 shadow-sm">{currentQuestion}</p>
 
                     <div className="flex items-center gap-2">
                       <Button
-                        size="md"
-                        onClick={() => speakQuestion(session.questions[session.currentQuestion])}
+                        size="default"
+                        onClick={() => speakQuestion(currentQuestion)}
                         disabled={isSpeaking}
                         variant="outline"
                         className="rounded-lg px-4 py-2 text-base"
@@ -870,7 +999,7 @@ export default function ConductInterviewPage() {
                         />
                         <div className="flex gap-2">
                           <Button
-                            size="md"
+                            size="default"
                             onClick={() => {
                               if (textInput.trim()) {
                                 nextQuestion(textInput.trim())
@@ -883,7 +1012,7 @@ export default function ConductInterviewPage() {
                           </Button>
                           {speechRecognitionSupported && (
                             <Button
-                              size="md"
+                              size="default"
                               variant="outline"
                               onClick={() => {
                                 setShowTextInput(false)
@@ -901,7 +1030,7 @@ export default function ConductInterviewPage() {
                       <div className="flex gap-2">
                         {!isListening ? (
                           <Button
-                            size="md"
+                            size="default"
                             onClick={startListening}
                             className="flex items-center gap-1 rounded-lg px-4 py-2 text-base"
                             disabled={isSpeaking}
@@ -911,7 +1040,7 @@ export default function ConductInterviewPage() {
                           </Button>
                         ) : (
                           <Button
-                            size="md"
+                            size="default"
                             onClick={stopListening}
                             variant="destructive"
                             className="flex items-center gap-1 rounded-lg px-4 py-2 text-base"
@@ -923,7 +1052,7 @@ export default function ConductInterviewPage() {
 
                         {currentResponse && (
                           <Button
-                            size="md"
+                            size="default"
                             onClick={() => nextQuestion(currentResponse)}
                             className="flex items-center gap-1 rounded-lg px-4 py-2 text-base"
                           >
@@ -932,7 +1061,7 @@ export default function ConductInterviewPage() {
                         )}
 
                         <Button
-                          size="md"
+                          size="default"
                           variant="outline"
                           onClick={() => setShowTextInput(true)}
                           className="flex items-center gap-1 rounded-lg px-4 py-2 text-base"
@@ -1011,6 +1140,7 @@ export default function ConductInterviewPage() {
             )}
           </div>
         </div>
+        )}
       </div>
     </div>
   )

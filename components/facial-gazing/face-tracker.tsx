@@ -194,54 +194,61 @@ export function FaceTracker({ videoRef, isActive, onMetricsUpdate }: FaceTracker
         return;
       }
       if (!videoRef.current) {
+        console.log("FaceTracker: videoRef.current is null, waiting...");
         pollTimeout = window.setTimeout(waitForVideo, 100);
         return;
       }
+      console.log("FaceTracker: videoRef.current is available, starting face tracking");
       attachVideoListeners();
       startFaceTracking();
     };
 
     const startFaceTracking = () => {
       const initFaceTracking = async () => {
-        const filesetResolver = await FilesetResolver.forVisionTasks(
-          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
-        );
-        const faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
-          baseOptions: {
-            modelAssetPath:
-              "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-            delegate: "GPU",
-          },
-          numFaces: 1,
-          outputFaceBlendshapes: false,
-          runningMode: "IMAGE",
-        });
-        await faceLandmarker.setOptions({ runningMode: "VIDEO" });
-        faceLandmarkerRef.current = faceLandmarker;
-        const processFrame = () => {
-          if (!videoRef.current || !running) {
-            resetAllMetrics();
-            return;
-          }
-          if (
-            videoRef.current.paused ||
-            videoRef.current.ended ||
-            videoRef.current.readyState < 2 ||
-            videoRef.current.videoWidth === 0 ||
-            videoRef.current.videoHeight === 0
-          ) {
-            resetAllMetrics();
+        try {
+          const filesetResolver = await FilesetResolver.forVisionTasks(
+            "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+          );
+          const faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
+            baseOptions: {
+              modelAssetPath:
+                "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+              delegate: "GPU",
+            },
+            numFaces: 1,
+            outputFaceBlendshapes: false,
+            runningMode: "IMAGE",
+          });
+          await faceLandmarker.setOptions({ runningMode: "VIDEO" });
+          faceLandmarkerRef.current = faceLandmarker;
+          
+          const processFrame = () => {
+            if (!videoRef.current || !running) {
+              resetAllMetrics();
+              return;
+            }
+            if (
+              videoRef.current.paused ||
+              videoRef.current.ended ||
+              videoRef.current.readyState < 2 ||
+              videoRef.current.videoWidth === 0 ||
+              videoRef.current.videoHeight === 0
+            ) {
+              resetAllMetrics();
+              animationFrameRef.current = requestAnimationFrame(processFrame);
+              return;
+            }
+            if (frameCountRef.current % 10 === 0) {
+            }
+            const now = performance.now();
+            const result = faceLandmarker.detectForVideo(videoRef.current, now);
+            handleResults(result);
             animationFrameRef.current = requestAnimationFrame(processFrame);
-            return;
-          }
-          if (frameCountRef.current % 10 === 0) {
-          }
-          const now = performance.now();
-          const result = faceLandmarker.detectForVideo(videoRef.current, now);
-          handleResults(result);
+          };
           animationFrameRef.current = requestAnimationFrame(processFrame);
-        };
-        animationFrameRef.current = requestAnimationFrame(processFrame);
+        } catch (error) {
+          console.error("FaceTracker: Failed to initialize face tracking:", error);
+        }
       };
       initFaceTracking();
     };
