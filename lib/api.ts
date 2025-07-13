@@ -14,9 +14,9 @@ class ApiClient {
   private async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
     const url = `${this.baseURL}${endpoint}`
 
-    const headers: HeadersInit = {
+    const headers: Record<string, string> = {
       "Content-Type": "application/json",
-      ...options.headers,
+      ...(options.headers as Record<string, string>),
     }
 
     if (this.token) {
@@ -123,6 +123,82 @@ class ApiClient {
   async endInterview(interviewId: string) {
     return this.request(`/api/v1/interviews/${interviewId}/end`, {
       method: "POST",
+    })
+  }
+
+  async getInterviewDetails(interviewId: string) {
+    return this.getInterview(interviewId);
+  }
+
+  // LangChain Interview Endpoints
+  async getNextQuestion(payload: {
+    interview_id: string,
+    resume: any,
+    history: { question: string, answer: string }[],
+    position: string
+  }) {
+    return this.request("/api/v1/interviews/next-question", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    })
+  }
+
+  async getFollowUpQuestion(payload: {
+    interview_id: string,
+    original_question: string,
+    candidate_response: string
+  }) {
+    return this.request("/api/v1/interviews/follow-up", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    })
+  }
+
+  async getFeedback(payload: {
+    interview_id: string,
+    question: string,
+    response: string,
+    expected_keywords: string[]
+  }) {
+    return this.request("/api/v1/interviews/feedback", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    })
+  }
+
+  async getConversationSummary(interview_id: string) {
+    return this.request(`/api/v1/interviews/${interview_id}/conversation-summary`)
+  }
+
+  async clearConversationMemory(interview_id: string) {
+    return this.request(`/api/v1/interviews/${interview_id}/conversation-memory`, {
+      method: "DELETE",
+    })
+  }
+
+  // Coding Questions
+  async generateCodingQuestion(payload: {
+    interview_id: string,
+    resume: any,
+    position: string,
+    difficulty_level?: string
+  }) {
+    return this.request("/api/v1/interviews/coding-question", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    })
+  }
+
+  async evaluateCodingSolution(payload: {
+    interview_id: string,
+    question: string,
+    solution: string,
+    expected_approach: string,
+    position: string
+  }) {
+    return this.request("/api/v1/interviews/coding-evaluation", {
+      method: "POST",
+      body: JSON.stringify(payload),
     })
   }
 
