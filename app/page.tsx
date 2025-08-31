@@ -1,13 +1,16 @@
 "use client"
 
+import React from "react"
 import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Users, Calendar, FileText, TrendingUp, Video, Mic } from "lucide-react"
 import Link from "next/link"
+import { useTranslations } from 'next-intl';
 
 export default function HomePage() {
+  const t = useTranslations('Home');
   const [stats, setStats] = useState({
     totalCandidates: 0,
     activeInterviews: 0,
@@ -39,8 +42,8 @@ export default function HomePage() {
       <div className="container mx-auto px-4 py-8">
         {/* Header */}
         <div className="mb-8">
-          <h1 className="text-4xl font-bold text-gray-900 mb-2">AI Interview Platform</h1>
-          <p className="text-lg text-gray-600">Intelligent Virtual Interview System with Real-time Analysis</p>
+          <h1 className="text-4xl font-bold text-gray-900 mb-2">{t('title')}</h1>
+          <p className="text-lg text-gray-600">{t('subtitle')}</p>
         </div>
 
         {/* Quick Stats */}
@@ -84,6 +87,45 @@ export default function HomePage() {
               <div className="text-2xl font-bold text-orange-600">{stats.pendingReports}</div>
             </CardContent>
           </Card>
+        </div>
+
+        {/* Admin/Interviewer Tools */}
+        <div className="mb-8">
+          <h2 className="text-2xl font-bold text-gray-800 mb-4">Admin/Interviewer Tools</h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <Card className="border-2 border-indigo-200 hover:border-indigo-300 transition-colors">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Video className="h-5 w-5 text-indigo-600" />
+                  Live Monitoring
+                </CardTitle>
+                <CardDescription>
+                  Monitor candidate video/audio in real time (admin/interviewer only)
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Link href="/interviews/live-monitoring">
+                  <Button className="w-full bg-indigo-600 hover:bg-indigo-700">Go to Live Monitoring</Button>
+                </Link>
+              </CardContent>
+            </Card>
+            <Card className="border-2 border-purple-200 hover:border-purple-300 transition-colors">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <TrendingUp className="h-5 w-5 text-purple-600" />
+                  Analytics Dashboard
+                </CardTitle>
+                <CardDescription>
+                  View interview statistics and analytics (basic version)
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Link href="/reports/analytics">
+                  <Button className="w-full bg-purple-600 hover:bg-purple-700">Go to Analytics Dashboard</Button>
+                </Link>
+              </CardContent>
+            </Card>
+          </div>
         </div>
 
         {/* Main Actions */}

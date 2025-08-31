@@ -1,0 +1,11 @@
+{
+  "Home": {
+    "welcome": "Bienvenido a la plataforma de entrevistas AI"
+  },
+  "Navbar": {
+    "dashboard": "Tablero",
+    "candidates": "Candidatos",
+    "interviews": "Entrevistas",
+    "reports": "Informes"
+  }
+} 

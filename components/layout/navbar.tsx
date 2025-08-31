@@ -1,5 +1,5 @@
 "use client"
-
+import React from "react"
 import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import {
@@ -12,11 +12,14 @@ import {
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { User, Settings, LogOut, Menu, Home, Users, Calendar, FileText, Video } from "lucide-react"
 import Link from "next/link"
-import { usePathname } from "next/navigation"
+import { usePathname, useRouter } from "next/navigation"
+import { useLocale } from 'next-intl';
 
 export function Navbar() {
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
-  const pathname = usePathname()
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const router = useRouter();
+  const pathname = usePathname();
+  const locale = useLocale();
 
   const navigation = [
     { name: "Dashboard", href: "/", icon: Home },
@@ -31,6 +34,23 @@ export function Navbar() {
     }
     return pathname.startsWith(href)
   }
+
+  const locales = [
+    { code: 'en', label: 'English' },
+    { code: 'es', label: 'Español' },
+  ];
+
+  const handleLocaleChange = (nextLocale: string) => {
+    // Remove the current locale from the pathname if present
+    const segments = pathname.split('/');
+    if (locales.some(l => l.code === segments[1])) {
+      segments[1] = nextLocale;
+    } else {
+      segments.splice(1, 0, nextLocale);
+    }
+    const newPath = segments.join('/') || '/';
+    router.push(newPath);
+  };
 
   return (
     <nav className="bg-white shadow-sm border-b">
@@ -99,6 +119,18 @@ export function Navbar() {
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
+            <div className="relative ml-4">
+              <select
+                className="border rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                value={locale}
+                onChange={e => handleLocaleChange(e.target.value)}
+                aria-label="Select language"
+              >
+                {locales.map(locale => (
+                  <option key={locale.code} value={locale.code}>{locale.label}</option>
+                ))}
+              </select>
+            </div>
           </div>
 
           {/* Mobile menu button */}
@@ -158,6 +190,21 @@ export function Navbar() {
                 <LogOut className="mr-2 h-4 w-4" />
                 Log out
               </Button>
+            </div>
+            <div className="px-4 py-2 border-t border-gray-200">
+              <select
+                className="border rounded px-2 py-1 text-sm w-full focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                value={locale}
+                onChange={e => {
+                  handleLocaleChange(e.target.value);
+                  setIsMobileMenuOpen(false);
+                }}
+                aria-label="Select language"
+              >
+                {locales.map(locale => (
+                  <option key={locale.code} value={locale.code}>{locale.label}</option>
+                ))}
+              </select>
             </div>
           </div>
         </div>

@@ -37,16 +37,12 @@ class ApiClient {
 
   // Authentication
   async login(email: string, password: string) {
-    const formData = new URLSearchParams()
-    formData.append("email", email)
-    formData.append("password", password)
-
     return this.request("/api/v1/auth/login", {
       method: "POST",
       headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Type": "application/json",
       },
-      body: formData,
+      body: JSON.stringify({ email, password }),
     })
   }
 
@@ -128,6 +124,13 @@ class ApiClient {
 
   async getInterviewDetails(interviewId: string) {
     return this.getInterview(interviewId);
+  }
+
+  async saveAnswer(interviewId: string, answer: { question: string, answer: string, index?: number }) {
+    return this.request(`/api/v1/interviews/${interviewId}/answers`, {
+      method: "POST",
+      body: JSON.stringify(answer),
+    })
   }
 
   // LangChain Interview Endpoints
